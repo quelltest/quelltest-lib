@@ -60,6 +60,7 @@ class GeneratedTest(BaseModel):
     test_file_path: Path
     explanation: str
     generated_by: str  # "rule_engine" | "llm:model-name"
+    unknown_types: list[str] = Field(default_factory=list)  # types rule engine couldn't stub
 
 
 class VerificationStatus(str, Enum):

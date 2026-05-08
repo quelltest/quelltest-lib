@@ -41,10 +41,11 @@ from quell.core.models import (
 class Verifier:
     """Proves every generated test actually catches violations before writing."""
 
-    def __init__(self, config: QuellConfig):
+    def __init__(self, config: QuellConfig, project_root: Path | None = None):
         self.config = config
         self.backup_dir = config.backup_dir
         self.backup_dir.mkdir(parents=True, exist_ok=True)
+        self._project_root = project_root
 
     def verify(
         self, req: Requirement, test: GeneratedTest
@@ -152,13 +153,16 @@ class Verifier:
         req.target_file.write_text(modified)
 
     def _pytest(self, test_file: Path, src: Path) -> dict:  # type: ignore[type-arg]
+        # Run from project root so all package imports resolve correctly.
+        # Fall back to sig_inspector's finder, then src.parent.parent.
+        cwd = self._resolve_cwd(src)
         try:
             r = subprocess.run(
                 ["python", "-m", "pytest", str(test_file),
                  "-v", "--tb=short", "-q", "--no-header"],
                 capture_output=True, text=True,
                 timeout=self.config.verification_timeout_seconds,
-                cwd=src.parent.parent,
+                cwd=cwd,
             )
             return {
                 "passed": r.returncode == 0,
@@ -167,6 +171,19 @@ class Verifier:
             }
         except subprocess.TimeoutExpired:
             raise TimeoutError()
+
+    def _resolve_cwd(self, src: Path) -> Path:
+        """Find the correct working directory for pytest subprocess."""
+        if self._project_root and self._project_root.exists():
+            return self._project_root
+        # Walk up to find pyproject.toml / setup.py
+        markers = {"pyproject.toml", "setup.py", "setup.cfg"}
+        current = src.parent
+        while current != current.parent:
+            if any((current / m).exists() for m in markers):
+                return current
+            current = current.parent
+        return src.parent.parent
 
     def _ms(self, start: float) -> int:
         return int((time.time() - start) * 1000)

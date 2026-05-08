@@ -1,30 +1,30 @@
 """
-Rule-based test generation. Fast, deterministic, no LLM.
-Handles the majority of common cases.
+Rule-based test generation. Fast, deterministic, no LLM required.
 
-Rule per ConstraintKind:
-  MUST_RAISE   → pytest.raises() test with violating input
-  BOUNDARY     → test with boundary value (0, -1, etc.)
-  ENUM_VALID   → test with invalid enum value
-  MUST_RETURN  → test with exact value assertion (not just 'is not None')
-  BUG_REPRO    → test that should currently FAIL (bug exists)
-  MUTATION     → boundary/comparison test
+Pipeline per requirement:
+  1. Inspect function signature via AST (sig_inspector)
+  2. Build valid call stubs from type annotations / param names
+  3. Generate a real callable test (not a TODO scaffold)
+  4. Track unknown types for the diagnostic report
 
-LLM engine handles: CUSTOM, complex MUTATION, anything rule can't generate.
+ConstraintKind → test strategy:
+  MUST_RAISE   → pytest.raises(ExcType): func(violating_args)
+  BOUNDARY     → assert func(boundary_val) raises or returns sentinel
+  ENUM_VALID   → pytest.raises: func(invalid_enum_value)
+  MUST_RETURN  → assert func(valid_args) is not None (+ type check)
+  BUG_REPRO    → skeleton test that currently fails
 """
 from __future__ import annotations
 import re
 from pathlib import Path
-from quell.core.models import (
-    Requirement, GeneratedTest, ConstraintKind
-)
+from quell.core.models import Requirement, GeneratedTest, ConstraintKind
+from quell.synthesis import sig_inspector
 
 
 class RuleEngine:
     """Deterministic rule-based test generator. No LLM required."""
 
     def can_handle(self, req: Requirement) -> bool:
-        """Returns True if the rule engine can generate a test for this requirement."""
         return req.constraint_kind in {
             ConstraintKind.MUST_RAISE,
             ConstraintKind.BOUNDARY,
@@ -34,7 +34,6 @@ class RuleEngine:
         }
 
     def generate(self, req: Requirement) -> GeneratedTest | None:
-        """Generate a test for the given requirement. Returns None if unsupported."""
         if req.constraint_kind == ConstraintKind.MUST_RAISE:
             return self._must_raise(req)
         if req.constraint_kind == ConstraintKind.BOUNDARY:
@@ -47,6 +46,8 @@ class RuleEngine:
             return self._bug_repro(req)
         return None
 
+    # ── helpers ──────────────────────────────────────────────────────────────
+
     def _test_file(self, req: Requirement) -> Path:
         return (
             req.target_file.parent.parent / "tests" /
@@ -54,151 +55,182 @@ class RuleEngine:
         )
 
     def _name(self, req: Requirement) -> str:
-        func = re.sub(r'[^a-z0-9_]', '_', req.target_function.lower())
-        return f"test_quell_{func}_{req.id}"
+        func = re.sub(r"[^a-z0-9_]", "_", req.target_function.lower())
+        kind = req.constraint_kind.value
+        return f"test_quell_{func}_{kind}_{req.id[:8]}"
+
+    def _sig_info(self, req: Requirement) -> tuple[str, str, list[str], list[str]]:
+        """Return (call_expr, fixture_params_str, fixtures, unknown_types).
+
+        call_expr is the full call: 'func(arg1=val1, arg2=val2)'
+        For class methods: 'ClassName().method(args)' or 'obj.method(args)'
+        """
+        sig = sig_inspector.inspect(req.target_function, req.target_file)
+        mod = sig_inspector.module_path(req.target_file)
+        func = req.target_function
+        unknown: list[str] = []
+        fixtures: list[str] = []
+
+        if sig is None:
+            # No signature found — generate a minimal stub
+            call = f"{func}()"
+            return call, "", fixtures, [f"sig_not_found:{func}"]
+
+        call_args, fixtures, unknown = sig_inspector.stub_for_call(sig)
+
+        if sig.is_method and sig.class_name:
+            # Inspect __init__ to build instantiation
+            init_sig = sig_inspector.inspect_init(sig.class_name, req.target_file)
+            if init_sig is not None and init_sig.required_params:
+                init_args, init_fix, init_unk = sig_inspector.stub_for_call(init_sig)
+                fixtures.extend(init_fix)
+                unknown.extend(init_unk)
+                inst = f"{sig.class_name}({init_args})"
+            else:
+                inst = f"{sig.class_name}()"
+            call = f"{inst}.{func}({call_args})"
+        else:
+            call = f"{func}({call_args})"
+
+        fixture_str = f"({', '.join(dict.fromkeys(fixtures))})" if fixtures else "()"
+        return call, fixture_str, list(dict.fromkeys(fixtures)), unknown
+
+    def _import_line(self, req: Requirement) -> str:
+        mod = sig_inspector.module_path(req.target_file)
+        sig = sig_inspector.inspect(req.target_function, req.target_file)
+        if sig and sig.is_method and sig.class_name:
+            return f"from {mod} import {sig.class_name}"
+        return f"from {mod} import {req.target_function}"
+
+    def _setup_lines(self, fixtures: list[str]) -> str:
+        if "tmp_path" in fixtures:
+            return '    (tmp_path / "test_file.py").write_text("def foo(): pass\\n")\n'
+        return ""
+
+    # ── generators ───────────────────────────────────────────────────────────
 
     def _must_raise(self, req: Requirement) -> GeneratedTest:
         exc = "Exception"
-        if req.expected_behavior:
-            m = re.search(r'raises (\w+)', req.expected_behavior)
-            if m:
-                exc = m.group(1)
+        m = re.search(r"raises?\s+(\w+Error|\w+Exception|\w+)", req.description, re.I)
+        if m:
+            exc = m.group(1)
 
+        call, fixture_str, fixtures, unknown = self._sig_info(req)
+        imp = self._import_line(req)
+        setup = self._setup_lines(fixtures)
         name = self._name(req)
-        code = f'''def {name}():
-    """
-    Quell: {req.description}
-    Source: {req.source.value} — {req.raw_spec_text or ""}
-    """
+
+        code = f"""def {name}{fixture_str}:
+    \"\"\"Quell: {req.description}\"\"\"
     import pytest
-    # TODO: call {req.target_function} with input that violates: {req.description}
-    # Example: with pytest.raises({exc}):
-    #     {req.target_function}(<violating_input>)
-    raise NotImplementedError(
-        "Complete: call {req.target_function} with invalid input, "
-        "assert it raises {exc}"
-    )
-'''
+    {imp}
+{setup}    with pytest.raises({exc}):
+        {call}
+"""
         return GeneratedTest(
             requirement_id=req.id,
             test_function_name=name,
             test_code=code,
             test_file_path=self._test_file(req),
-            explanation=f"pytest.raises({exc}) test for: {req.description}",
+            explanation=f"pytest.raises({exc}): {req.description}",
             generated_by="rule_engine",
+            unknown_types=unknown,
         )
 
     def _boundary(self, req: Requirement) -> GeneratedTest:
+        call, fixture_str, fixtures, unknown = self._sig_info(req)
+        imp = self._import_line(req)
+        setup = self._setup_lines(fixtures)
         name = self._name(req)
-        boundary_val = "0"
-        if "positive" in req.description.lower() or "> 0" in req.description:
-            boundary_val = "0"
-        elif ">= 1" in req.description or "at least 1" in req.description.lower():
-            boundary_val = "0"
-        elif "between 0 and 100" in req.description.lower():
-            boundary_val = "-1"
 
-        code = f'''def {name}():
-    """
-    Quell: {req.description}
-    Source: {req.source.value} — {req.raw_spec_text or ""}
+        # Replace the first numeric arg stub with the boundary value
+        boundary_call = _inject_boundary_value(call, req.description)
 
-    Boundary test: the violation is passing value={boundary_val}
-    """
+        code = f"""def {name}{fixture_str}:
+    \"\"\"Quell: {req.description}\"\"\"
     import pytest
-    # TODO: call {req.target_function} with boundary value {boundary_val}
-    # This should raise an error or return a different result than valid input
-    raise NotImplementedError(
-        "Complete: call {req.target_function}(<input with {boundary_val} "
-        "for the constrained param>), assert it's rejected"
-    )
-'''
+    {imp}
+{setup}    with pytest.raises(Exception):
+        {boundary_call}
+"""
         return GeneratedTest(
             requirement_id=req.id,
             test_function_name=name,
             test_code=code,
             test_file_path=self._test_file(req),
-            explanation=f"Boundary test at value={boundary_val}: {req.description}",
+            explanation=f"Boundary violation: {req.description}",
             generated_by="rule_engine",
+            unknown_types=unknown,
         )
 
     def _enum(self, req: Requirement) -> GeneratedTest:
+        call, fixture_str, fixtures, unknown = self._sig_info(req)
+        imp = self._import_line(req)
+        setup = self._setup_lines(fixtures)
         name = self._name(req)
-        invalid = "INVALID_VALUE"
 
-        code = f'''def {name}():
-    """
-    Quell: {req.description}
-    Source: {req.source.value} — {req.raw_spec_text or ""}
+        # Replace the first string arg with an invalid enum value
+        enum_call = re.sub(r'"test_value"', '"__INVALID_ENUM__"', call, count=1)
 
-    Enum test: passing a value NOT in the allowed set should be rejected.
-    """
+        code = f"""def {name}{fixture_str}:
+    \"\"\"Quell: {req.description}\"\"\"
     import pytest
-    # TODO: call {req.target_function} with an invalid enum value
-    # Example: with pytest.raises((ValueError, ValidationError)):
-    #     {req.target_function}(<param>="{invalid}")
-    raise NotImplementedError(
-        "Complete: pass an invalid value for the enum parameter, "
-        "assert it's rejected with an error"
-    )
-'''
+    {imp}
+{setup}    with pytest.raises(Exception):
+        {enum_call}
+"""
         return GeneratedTest(
             requirement_id=req.id,
             test_function_name=name,
             test_code=code,
             test_file_path=self._test_file(req),
-            explanation=f"Enum violation test: {req.description}",
+            explanation=f"Enum violation: {req.description}",
             generated_by="rule_engine",
+            unknown_types=unknown,
         )
 
     def _must_return(self, req: Requirement) -> GeneratedTest:
+        call, fixture_str, fixtures, unknown = self._sig_info(req)
+        imp = self._import_line(req)
+        setup = self._setup_lines(fixtures)
         name = self._name(req)
-        code = f'''def {name}():
-    """
-    Quell: {req.description}
-    Source: {req.source.value} — {req.raw_spec_text or ""}
 
-    Return value test: assert EXACT return value, not just "is not None".
-    """
-    # TODO: call {req.target_function} with valid inputs
-    # result = {req.target_function}(...)
-    # assert result is not None
-    # assert <specific field or value check>  ← be precise here
-    raise NotImplementedError(
-        "Complete: call {req.target_function}, assert exact return value"
-    )
-'''
+        code = f"""def {name}{fixture_str}:
+    \"\"\"Quell: {req.description}\"\"\"
+    {imp}
+{setup}    result = {call}
+    assert result is not None
+"""
         return GeneratedTest(
             requirement_id=req.id,
             test_function_name=name,
             test_code=code,
             test_file_path=self._test_file(req),
-            explanation=f"Return value test: {req.description}",
+            explanation=f"Return not-None: {req.description}",
             generated_by="rule_engine",
+            unknown_types=unknown,
         )
 
     def _bug_repro(self, req: Requirement) -> GeneratedTest:
+        call, fixture_str, fixtures, unknown = self._sig_info(req)
+        imp = self._import_line(req)
+        setup = self._setup_lines(fixtures)
         name = self._name(req)
-        inputs_hint = str(req.violation_input) if req.violation_input else "<triggering_input>"
-        expected = req.expected_behavior or "raise an error or return correct value"
+        inputs = str(req.violation_input) if req.violation_input else "see description"
+        expected = req.expected_behavior or "should not silently accept invalid input"
 
-        code = f'''def {name}():
-    """
+        code = f"""def {name}{fixture_str}:
+    \"\"\"
     Quell bug reproduction: {req.description}
-
-    This test should FAIL on current code (bug exists).
-    After fixing the bug, this test should PASS.
-    Inputs that trigger the bug: {inputs_hint}
-    Expected behavior: {expected}
-    """
-    import pytest
-    # TODO: call {req.target_function} with: {inputs_hint}
-    # Assert the CORRECT behavior (what SHOULD happen, not what currently happens)
-    raise NotImplementedError(
-        "Complete: reproduce the bug — call {req.target_function} "
-        "with {inputs_hint}, assert {expected}"
-    )
-'''
+    Triggering input: {inputs}
+    Expected: {expected}
+    This test FAILS while the bug exists. Fix the code to make it pass.
+    \"\"\"
+    {imp}
+{setup}    import pytest
+    with pytest.raises(Exception):
+        {call}
+"""
         return GeneratedTest(
             requirement_id=req.id,
             test_function_name=name,
@@ -206,4 +238,30 @@ class RuleEngine:
             test_file_path=self._test_file(req),
             explanation=f"Bug reproduction: {req.description}",
             generated_by="rule_engine",
+            unknown_types=unknown,
         )
+
+
+# ── module-level helpers ──────────────────────────────────────────────────────
+
+def _inject_boundary_value(call: str, description: str) -> str:
+    """Replace the first numeric stub in call with a boundary-violating value."""
+    boundary_val = "0"
+    desc_lower = description.lower()
+    if "positive" in desc_lower or "> 0" in description or "gt=0" in description:
+        boundary_val = "0"
+    elif ">= 1" in description or "at least 1" in desc_lower or "ge=1" in description:
+        boundary_val = "0"
+    elif "negative" in desc_lower or "< 0" in description:
+        boundary_val = "1"
+    elif "between 0 and 1" in desc_lower:
+        boundary_val = "-1"
+    elif "between 0 and 100" in desc_lower:
+        boundary_val = "-1"
+
+    # Replace first integer stub (=1 or =0) with boundary value
+    modified = re.sub(r"=\b\d+\b", f"={boundary_val}", call, count=1)
+    if modified == call:
+        # No integer found — append the boundary param
+        modified = call.rstrip(")") + f", value={boundary_val})"
+    return modified

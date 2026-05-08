@@ -86,6 +86,13 @@ def cmd_check(
             + (" Run with --fix to generate tests." if not fix else "")
         )
 
+    if fix and result.report_path:
+        console.print(
+            f"\n[bold]Diagnostic report:[/bold] {result.report_path}\n"
+            "[dim]Share this file with the Quell maintainer to improve "
+            "rule engine coverage. No source code is included.[/dim]"
+        )
+
 
 @app.command("reproduce")
 def cmd_reproduce(
