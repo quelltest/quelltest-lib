@@ -109,10 +109,15 @@ def login() -> dict:  # type: ignore[type-arg]
                 f'style="font-family:sans-serif;padding:40px;text-align:center">'
                 f"<h2>{message}</h2></body></html>"
             )
+            body = html.encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            # Force browser to close the connection so server.shutdown() doesn't hang
+            self.send_header("Connection", "close")
             self.end_headers()
-            self.wfile.write(html.encode())
+            self.wfile.write(body)
+            self.wfile.flush()
 
         def log_message(self, *args: object) -> None:
             pass  # suppress server logs
@@ -147,8 +152,11 @@ def login() -> dict:  # type: ignore[type-arg]
             "client_id": CLIENT_ID,
             "code_verifier": verifier,
         },
-        timeout=15.0,
+        timeout=8.0,
     )
+    if token_resp.status_code >= 400:
+        detail = token_resp.json().get("detail", token_resp.text) if token_resp.headers.get("content-type", "").startswith("application/json") else token_resp.text
+        raise RuntimeError(f"Token exchange failed ({token_resp.status_code}): {detail}")
     token_resp.raise_for_status()
     tokens = token_resp.json()
 
