@@ -258,9 +258,10 @@ class RuleEngine:
                     null_param = k
                     break
 
-        # If the null variable is not in the function signature, it's a local variable.
-        # Injecting it as a kwarg produces a TypeError — skip instead.
-        if null_param and null_param not in call:
+        # If the null variable is not an actual kwarg in the generated call, it's a local
+        # variable (DB result, computed value, etc.). Use word-boundary check so "user"
+        # doesn't false-match inside "user_id=" or "join_team_via_link(...)".
+        if null_param and not re.search(rf"\b{re.escape(null_param)}\b\s*=", call):
             return None
 
         if null_param:
