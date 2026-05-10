@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "quelltest"
-version = "0.6.0"
+version = "0.6.1"
 description = "Your code says what it should do. Quell proves it."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -96,3 +96,8 @@ enable_docstring = true
 enable_types = true
 enable_mutations = false
 score_threshold = 0.0
+
+[dependency-groups]
+dev = [
+    "twine>=6.2.0",
+]
