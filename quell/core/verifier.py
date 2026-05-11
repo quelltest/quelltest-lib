@@ -229,30 +229,66 @@ class Verifier:
 
 # ── env handling ─────────────────────────────────────────────────────────────
 
-def _load_dotenv(cwd: Path) -> dict[str, str]:
-    """Read .env at `cwd` and return its KEY=VALUE pairs as a dict.
+# Files we try, in order of *lowest* to *highest* priority. Templates and
+# examples are loaded first so they fill in placeholder values for any var
+# the user hasn't set elsewhere; the real .env files override them.
+# Rationale: a template that says `MONGODB_URI=changeme` is enough to let
+# pydantic-settings instantiate at app import — better than KeyError, even
+# if the value can't actually connect anywhere.
+_DOTENV_CANDIDATES: tuple[str, ...] = (
+    ".env.template",
+    ".env.example",
+    ".env.sample",
+    ".env.dist",
+    ".secrets",
+    ".env.local",
+    ".env.development",
+    ".env.dev",
+    ".env",
+)
 
-    Minimal parser — no python-dotenv dependency. Skips comments and blank
-    lines; supports `KEY=VALUE`, `KEY="VALUE"`, `KEY='VALUE'`. Returns {}
-    if the file doesn't exist or is unreadable. Never raises.
+
+def _load_dotenv(cwd: Path) -> dict[str, str]:
+    """Merge KEY=VALUE pairs from every dotenv-family file at `cwd`.
+
+    Later files in `_DOTENV_CANDIDATES` override earlier ones, so real
+    `.env` wins over `.env.example`. Minimal in-tree parser — no
+    python-dotenv dependency. Returns {} if nothing readable found.
+    Never raises.
     """
-    env_file = cwd / ".env"
-    if not env_file.exists():
-        return {}
-    try:
-        text = env_file.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return {}
+    merged: dict[str, str] = {}
+    for name in _DOTENV_CANDIDATES:
+        path = cwd / name
+        if not path.exists():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        merged.update(_parse_dotenv(text))
+    return merged
+
+
+def _parse_dotenv(text: str) -> dict[str, str]:
+    """Parse one dotenv file's contents. Accepts KEY=VALUE, KEY="V", KEY='V'."""
     out: dict[str, str] = {}
     for raw in text.splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
+        # Allow `export FOO=bar` (some teams write .env this way)
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
         key, _, value = line.partition("=")
         key = key.strip()
         if not key or not key.replace("_", "").isalnum():
             continue
         value = value.strip()
+        # Strip an inline comment that isn't inside quotes
+        if value and value[0] not in ("'", '"'):
+            hash_pos = value.find(" #")
+            if hash_pos != -1:
+                value = value[:hash_pos].rstrip()
         if (value.startswith('"') and value.endswith('"')) or (
             value.startswith("'") and value.endswith("'")
         ):
