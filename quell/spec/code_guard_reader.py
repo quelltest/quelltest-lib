@@ -112,6 +112,18 @@ class CodeGuardReader:
         path: Path,
         source: str,
     ) -> list[Requirement]:
+        # Skip pure abstract stubs — entire body is `raise NotImplementedError`.
+        # These are interface contracts, not testable guards: subclasses implement
+        # them and the raise is intentional boilerplate, not a guard to verify.
+        real_body = [n for n in func.body if not isinstance(n, (ast.Expr, ast.Pass))]
+        if (
+            len(real_body) == 1
+            and isinstance(real_body[0], ast.Raise)
+            and real_body[0].exc is not None
+            and _exc_name(real_body[0].exc) in ("NotImplementedError", "AbstractMethodError")
+        ):
+            return []
+
         reqs: list[Requirement] = []
         lines = source.splitlines()
 

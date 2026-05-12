@@ -146,7 +146,14 @@ class RuleEngine:
         search_text = req.description + " " + (req.expected_behavior or "")
         m = re.search(r"\braises?\s+(\w+Error|\w+Exception)", search_text, re.I)
         if m:
-            exc = m.group(1)
+            candidate = m.group(1)
+            # Only use the extracted name if it's a builtin exception — otherwise
+            # the test file would reference it without an import and get NameError.
+            # Project-specific exceptions (e.g. ProxyError, LocationValueError)
+            # need an import we can't always resolve statically; use Exception as
+            # the safe fallback so the test at least runs without NameError.
+            if candidate in _BUILTIN_EXCEPTIONS:
+                exc = candidate
 
         call, fixture_str, fixtures, unknown = self._sig_info(req)
         imp = self._import_line(req)
@@ -472,6 +479,30 @@ class RuleEngine:
 
 
 # ── module-level helpers ──────────────────────────────────────────────────────
+
+# Python builtin exception names that are always in scope — no import needed.
+# Any exception class NOT in this set comes from a library and needs an import
+# we can't safely synthesise, so we fall back to `Exception`.
+_BUILTIN_EXCEPTIONS: frozenset[str] = frozenset({
+    "Exception", "BaseException", "ArithmeticError", "AssertionError",
+    "AttributeError", "BlockingIOError", "BrokenPipeError", "BufferError",
+    "BytesWarning", "ChildProcessError", "ConnectionAbortedError",
+    "ConnectionError", "ConnectionRefusedError", "ConnectionResetError",
+    "DeprecationWarning", "EOFError", "EnvironmentError", "FileExistsError",
+    "FileNotFoundError", "FloatingPointError", "FutureWarning", "GeneratorExit",
+    "IOError", "ImportError", "ImportWarning", "IndentationError", "IndexError",
+    "InterruptedError", "IsADirectoryError", "KeyError", "KeyboardInterrupt",
+    "LookupError", "MemoryError", "ModuleNotFoundError", "NameError",
+    "NotADirectoryError", "NotImplementedError", "OSError", "OverflowError",
+    "PendingDeprecationWarning", "PermissionError", "ProcessLookupError",
+    "RecursionError", "ReferenceError", "ResourceWarning", "RuntimeError",
+    "RuntimeWarning", "StopAsyncIteration", "StopIteration", "SyntaxError",
+    "SyntaxWarning", "SystemError", "SystemExit", "TabError", "TimeoutError",
+    "TypeError", "UnboundLocalError", "UnicodeDecodeError", "UnicodeEncodeError",
+    "UnicodeError", "UnicodeTranslateError", "UnicodeWarning", "UserWarning",
+    "ValueError", "Warning", "ZeroDivisionError",
+})
+
 
 def _return_is_optional(annotation: str | None) -> bool:
     """Return True if annotation allows None (Optional[X], X | None, None)."""

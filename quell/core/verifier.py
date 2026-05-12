@@ -88,6 +88,23 @@ def _resolve_pytest_cmd() -> list[str]:
 _PYTEST_CMD_CACHE: list[str] | None = None
 
 
+def _prepend_src_paths(env: dict[str, str], cwd: Path) -> None:
+    """Prepend local source trees to PYTHONPATH.
+
+    When code lives in src/ (e.g. src/requests/adapters.py), the test
+    subprocess must import from there — not from the installed site-packages
+    copy — so that Quell's injected violation is actually visible to the test.
+    We prepend src/, lib/, and cwd itself; whichever exist win over site-packages.
+    """
+    sep = ";" if sys.platform == "win32" else ":"
+    extra = [
+        str(p) for p in (cwd / "src", cwd / "lib", cwd)
+        if p.is_dir()
+    ]
+    existing = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = sep.join(extra + ([existing] if existing else []))
+
+
 class Verifier:
     """Proves every generated test actually catches violations before writing."""
 
@@ -224,6 +241,12 @@ class Verifier:
         cwd = self._resolve_cwd(src)
         env = os.environ.copy()
         env.update(_load_dotenv(cwd))
+        # Prepend local source trees to PYTHONPATH so the mutated local copy
+        # shadows any installed version in site-packages. Without this, when
+        # code lives in src/ the violation is injected into src/pkg/module.py
+        # but the test imports the unmodified site-packages version — making
+        # every mutation invisible and producing DOESNT_CATCH_VIOLATION.
+        _prepend_src_paths(env, cwd)
         cmd = _resolve_pytest_cmd()
         try:
             r = subprocess.run(
