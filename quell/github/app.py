@@ -1,25 +1,26 @@
 """
-Quell GitHub App — webhook server deployed at quell.build.
+Quell GitHub App — webhook server deployed at your chosen host.
 
-Receives GitHub pull_request events, runs the Quell CI pipeline on the
-changed code, and posts a verified-test comment back to the PR.
+Receives GitHub pull_request events, runs the Quell guard-clause scanner on
+the changed Python files (via GitHub API — no repo clone needed), and posts
+a verified comment back to the PR.
 
-Environment variables required (set in Render/Railway/Fly.io dashboard):
+Environment variables required:
     GITHUB_APP_ID          — App ID from GitHub App settings
-    GITHUB_APP_PRIVATE_KEY — PEM private key (paste full contents)
+    GITHUB_APP_PRIVATE_KEY — PEM private key (paste full contents, \\n escaped)
     GITHUB_WEBHOOK_SECRET  — Webhook secret set in App settings
-    QUELL_WORK_DIR         — Temp directory for cloning repos (default: /tmp)
+    QUELL_WORK_DIR         — (optional) temp dir for file writes (default: /tmp)
 
 Run locally:
-    pip install quell[github]
+    pip install quelltest fastapi uvicorn PyJWT cryptography
     uvicorn quell.github.app:app --host 0.0.0.0 --port 8080
 
 Architecture:
     GitHub sends pull_request webhook
         → validate HMAC signature
-        → get installation token
-        → clone PR branch to tmp dir
-        → run: quell ci --diff-only --report json
+        → get installation token (no repo clone — uses GitHub API directly)
+        → GitHubPRRunner fetches changed .py files via Contents API
+        → CodeGuardReader scans for untested guard clauses
         → format results as markdown
         → post/update PR comment
 """
@@ -30,14 +31,11 @@ import hashlib
 import hmac
 import json
 import os
-import subprocess
-import tempfile
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, Response
 
 from quell.github.auth import generate_app_jwt, get_installation_token
-from quell.github.formatter import format_pr_comment
 from quell.github.pr_commenter import post_or_update_pr_comment
 
 app = FastAPI(title="Quell GitHub App", version="1.0.0")
@@ -58,7 +56,7 @@ async def github_webhook(request: Request) -> Response:
     """
     Handle incoming GitHub webhook events.
 
-    Only processes pull_request events with action opened/synchronize.
+    Only processes pull_request events with action opened/synchronize/reopened.
     All other events return 200 immediately.
     """
     body = await request.body()
@@ -91,71 +89,87 @@ def _verify_signature(body: bytes, signature_header: str) -> None:
 
 async def _handle_pr_event(payload: dict) -> None:
     """
-    Clone the PR branch, run Quell CI, post the result as a PR comment.
+    Fetch changed files via GitHub API, run CodeGuardReader, post PR comment.
 
-    Runs in a background task so the webhook response is immediate.
+    Uses the Contents API — no repo clone needed. Runs in a background task
+    so the webhook response returns immediately.
     """
-    repo_full = payload["repository"]["full_name"]      # "owner/repo"
-    clone_url = payload["repository"]["clone_url"]
-    branch = payload["pull_request"]["head"]["ref"]
+    repo_full = payload["repository"]["full_name"]   # "owner/repo"
     pr_number = payload["pull_request"]["number"]
     installation_id = payload["installation"]["id"]
 
-    # Get installation token
+    # Get installation token scoped to this repo
     app_jwt = generate_app_jwt(_APP_ID, _PRIVATE_KEY)
     token = await get_installation_token(app_jwt, installation_id)
 
-    # Clone into a temp dir and run quell ci
-    with tempfile.TemporaryDirectory(dir=os.getenv("QUELL_WORK_DIR", "/tmp")) as tmpdir:
-        work_dir = Path(tmpdir)
+    # Run guard-clause scan via GitHub API (no clone)
+    from quell.github.pr_runner import GitHubPRRunner
 
-        # Inject token into clone URL for auth
-        auth_url = clone_url.replace("https://", f"https://x-access-token:{token}@")
-        subprocess.run(
-            ["git", "clone", "--depth=1", "--branch", branch, auth_url, str(work_dir)],
-            check=True,
-            capture_output=True,
-        )
-
-        # Run quell ci --diff-only --report json
-        subprocess.run(
-            ["quell", "ci", "--diff-only", "--report", "json"],
-            cwd=work_dir,
-            capture_output=True,
-            text=True,
-        )
-
-        # Load the JSON report written to .quell/ci-report.json
-        report_path = work_dir / ".quell" / "ci-report.json"
-        if not report_path.exists():
-            return  # quell couldn't run (no mutmut cache, etc.)
-
-        report_data = json.loads(report_path.read_text())
-
-    # Build and post the PR comment
-    # We use a simplified comment when running from the App
-    # (no full ProjectScore object available without re-calculating)
-    from quell.ci.reporter import CIReport
-    from quell.ci.threshold import ThresholdResult
-    from quell.score.calculator import ProjectScore
-
-    threshold_result = ThresholdResult(
-        passed=report_data.get("threshold_passed", True),
-        score=report_data.get("score_after", 0.0),
-        threshold=report_data.get("threshold", 0.0),
-        message="",
-    )
-    ci_report = CIReport(
-        score_before=report_data.get("score_before", 0.0),
-        score_after=report_data.get("score_after", 0.0),
-        fixed_count=report_data.get("fixed", 0),
-        skipped_count=report_data.get("skipped", 0),
-        total_survivors=report_data.get("total_survivors", 0),
-        threshold_result=threshold_result,
+    runner = GitHubPRRunner(
+        pr_number=pr_number,
+        repo=repo_full,
+        token=token,
+        project_root=Path("."),
     )
 
-    comment_body = format_pr_comment(ci_report, ProjectScore())
+    try:
+        report = runner.run_quell_on_pr()
+    except Exception:
+        return  # silently skip — avoid spam on broken repos
+
+    comment_body = _format_app_comment(report)
     await post_or_update_pr_comment(token, repo_full, pr_number, comment_body)
+
+
+# Marker so the bot updates its own comment instead of posting new ones
+_COMMENT_MARKER = "<!-- quell-guard-scan -->"
+
+
+def _format_app_comment(report: dict) -> str:
+    """Format the guard-clause scan results as GitHub PR markdown."""
+    from quell import __version__
+
+    gaps = report.get("gaps", [])
+    total = report.get("total_requirements", 0)
+    covered = report.get("covered_requirements", 0)
+
+    emoji = "\U0001f7e2" if not gaps else ("\U0001f7e1" if len(gaps) < 5 else "\U0001f534")
+    lines = [_COMMENT_MARKER, ""]
+    lines.append(f"## {emoji} Quell — Guard Clause Scan")
+    lines.append("")
+
+    if total == 0:
+        lines.append("No guard clauses found in changed Python files.")
+    elif not gaps:
+        lines.append(f"✅ **All {total} guard clause{'s' if total != 1 else ''} are tested.**")
+    else:
+        pct = int(covered / total * 100) if total else 100
+        lines.append(
+            f"**{len(gaps)} untested guard clause{'s' if len(gaps) != 1 else ''} found** "
+            f"in changed files &nbsp;|&nbsp; {pct}% covered ({covered}/{total})"
+        )
+        lines.append("")
+        lines.append("| File | Function | Guard | Type |")
+        lines.append("|------|----------|-------|------|")
+        for g in gaps[:15]:
+            guard_text = (g.get("description") or "")[:60]
+            line_ref = f":{g['line']}" if g.get("line") else ""
+            lines.append(
+                f"| `{g['file']}{line_ref}` | `{g['function']}` "
+                f"| {guard_text} | `{g['kind']}` |"
+            )
+        if len(gaps) > 15:
+            lines.append(f"| _...and {len(gaps) - 15} more_ | | | |")
+        lines.append("")
+        lines.append("**Fix locally:** `quell scan src/ --fix`")
+
+    lines.append("")
+    lines.append("---")
+    lines.append(
+        f"*[Quell](https://quell.buildsbyshashank.tech) v{__version__} "
+        "— rule-based guard scanner, no code sent to any server*"
+    )
+    return "\n".join(lines)
 
 
 def main() -> None:

@@ -30,8 +30,8 @@ def test_can_handle_enum_valid(tmp_path: Path) -> None:
     assert RuleEngine().can_handle(_req(ConstraintKind.ENUM_VALID, tmp_path))
 
 
-def test_cannot_handle_custom(tmp_path: Path) -> None:
-    assert not RuleEngine().can_handle(_req(ConstraintKind.CUSTOM, tmp_path))
+def test_can_handle_custom(tmp_path: Path) -> None:
+    assert RuleEngine().can_handle(_req(ConstraintKind.CUSTOM, tmp_path))
 
 
 def test_generate_must_raise_returns_test(tmp_path: Path) -> None:
@@ -61,10 +61,13 @@ def test_generate_enum_returns_test(tmp_path: Path) -> None:
     assert "INVALID_VALUE" in test.test_code
 
 
-def test_generate_returns_none_for_unsupported(tmp_path: Path) -> None:
+def test_generate_custom_returns_test(tmp_path: Path) -> None:
     req = _req(ConstraintKind.CUSTOM, tmp_path)
     engine = RuleEngine()
-    assert engine.generate(req) is None
+    # CUSTOM is handled — sig not found for non-existent function generates a minimal stub
+    test = engine.generate(req)
+    assert test is not None
+    assert test.test_function_name.startswith("test_quell_")
 
 
 def test_generated_by_is_rule_engine(tmp_path: Path) -> None:

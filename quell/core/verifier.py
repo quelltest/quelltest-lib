@@ -32,9 +32,11 @@ ABSOLUTE RULES — never violate:
 from __future__ import annotations
 
 import ast as _ast
+import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -46,6 +48,61 @@ from quell.core.models import (
     VerificationResult,
     VerificationStatus,
 )
+
+
+def _resolve_pytest_cmd() -> list[str]:
+    """Return the best available pytest invocation (result is module-cached).
+
+    Priority:
+      1. sys.executable -m pytest  — same interpreter as Quell; works when
+         pytest is installed in the active venv (the common case).
+      2. pytest / py.test from PATH — fallback for conda/system setups where
+         quell and pytest live in different environments (e.g. quelltest
+         installed in ai_env but pytest only available on PATH).
+    """
+    global _PYTEST_CMD_CACHE
+    if _PYTEST_CMD_CACHE is not None:
+        return _PYTEST_CMD_CACHE
+
+    # Fast-path: check if pytest is importable in the current interpreter.
+    probe = subprocess.run(
+        [sys.executable, "-c", "import pytest"],
+        capture_output=True,
+    )
+    if probe.returncode == 0:
+        _PYTEST_CMD_CACHE = [sys.executable, "-m", "pytest"]
+        return _PYTEST_CMD_CACHE
+
+    # Fallback: find pytest executable anywhere on PATH.
+    for exe in ("pytest", "py.test"):
+        found = shutil.which(exe)
+        if found:
+            _PYTEST_CMD_CACHE = [found]
+            return _PYTEST_CMD_CACHE
+
+    # Last resort: try anyway and let the error surface naturally.
+    _PYTEST_CMD_CACHE = [sys.executable, "-m", "pytest"]
+    return _PYTEST_CMD_CACHE
+
+
+_PYTEST_CMD_CACHE: list[str] | None = None
+
+
+def _prepend_src_paths(env: dict[str, str], cwd: Path) -> None:
+    """Prepend local source trees to PYTHONPATH.
+
+    When code lives in src/ (e.g. src/requests/adapters.py), the test
+    subprocess must import from there — not from the installed site-packages
+    copy — so that Quell's injected violation is actually visible to the test.
+    We prepend src/, lib/, and cwd itself; whichever exist win over site-packages.
+    """
+    sep = ";" if sys.platform == "win32" else ":"
+    extra = [
+        str(p) for p in (cwd / "src", cwd / "lib", cwd)
+        if p.is_dir()
+    ]
+    existing = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = sep.join(extra + ([existing] if existing else []))
 
 
 class Verifier:
@@ -69,10 +126,15 @@ class Verifier:
             # Step 1: test must PASS on correct code
             orig = self._pytest(temp, req.target_file)
             if not orig["passed"]:
+                # pytest writes failure details to stdout in --tb=short mode;
+                # stderr is mostly empty unless the subprocess itself crashed.
+                # Capture both so the diagnostic surfaces the real reason
+                # (ImportError, missing env var, app startup failure, etc.).
+                combined = (orig.get("stdout", "") or "") + "\n" + (orig.get("stderr", "") or "")
                 return VerificationResult(
                     requirement_id=req.id, generated_test=test,
                     status=VerificationStatus.FAILS_ON_CORRECT,
-                    error_message=orig.get("stderr", ""),
+                    error_message=combined.strip(),
                     duration_ms=self._ms(start),
                 )
 
@@ -113,7 +175,13 @@ class Verifier:
         d = self.backup_dir / "temp"
         d.mkdir(parents=True, exist_ok=True)
         f = d / f"quell_{test.requirement_id}.py"
-        f.write_text(test.test_code)
+        # CRITICAL: utf-8 explicitly. On Windows, Path.write_text() defaults to
+        # cp1252; Python source is utf-8 (PEP 3120). Em-dashes in Quell
+        # descriptions become byte 0x97 in cp1252, which is invalid utf-8 — pytest
+        # then fails to parse the file and the test reports FAILS_ON_CORRECT for
+        # the wrong reason. This single line is the difference between
+        # verified=0 and verified>0 on Windows.
+        f.write_text(test.test_code, encoding="utf-8")
         return f
 
     def _backup(self, src: Path) -> Path:
@@ -131,14 +199,28 @@ class Verifier:
         if req.constraint_kind == ConstraintKind.BUG_REPRO:
             return  # already broken
 
-        src = req.target_file.read_text()
+        src = req.target_file.read_text(encoding="utf-8")
 
-        if req.constraint_kind == ConstraintKind.MUST_RAISE:
+        # All kinds whose test asserts `pytest.raises(...)` need the function's
+        # raises commented out to break the guard. Without this, step 3 runs
+        # the same code and the test passes again → DOESNT_CATCH_VIOLATION.
+        raise_based = {
+            ConstraintKind.MUST_RAISE,
+            ConstraintKind.NOT_NULL,
+            ConstraintKind.ENUM_VALID,
+            ConstraintKind.TYPE_CHECK,
+            ConstraintKind.AUTH_CHECK,
+            ConstraintKind.MAGIC_VALUE,
+            ConstraintKind.CUSTOM,
+        }
+        if req.constraint_kind in raise_based:
             modified = _violate_must_raise(src, req.target_function)
         elif req.constraint_kind == ConstraintKind.BOUNDARY:
             modified = _violate_boundary(src, req.target_function)
         elif req.constraint_kind == ConstraintKind.MUST_RETURN:
             modified = _violate_must_return(src, req.target_function)
+        elif req.constraint_kind == ConstraintKind.SILENT_FAIL:
+            modified = _violate_silent_fail(src, req.target_function)
         elif req.constraint_kind == ConstraintKind.MUTATION:
             try:
                 subprocess.run(
@@ -150,21 +232,30 @@ class Verifier:
                 pass
             return
         else:
-            return  # CUSTOM — LLM handles injection in llm_engine
+            return
 
-        req.target_file.write_text(modified)
+        req.target_file.write_text(modified, encoding="utf-8")
 
     def _pytest(self, test_file: Path, src: Path) -> dict:  # type: ignore[type-arg]
         # Run from project root so all package imports resolve correctly.
-        # Fall back to sig_inspector's finder, then src.parent.parent.
         cwd = self._resolve_cwd(src)
+        env = os.environ.copy()
+        env.update(_load_dotenv(cwd))
+        # Prepend local source trees to PYTHONPATH so the mutated local copy
+        # shadows any installed version in site-packages. Without this, when
+        # code lives in src/ the violation is injected into src/pkg/module.py
+        # but the test imports the unmodified site-packages version — making
+        # every mutation invisible and producing DOESNT_CATCH_VIOLATION.
+        _prepend_src_paths(env, cwd)
+        cmd = _resolve_pytest_cmd()
         try:
             r = subprocess.run(
-                ["python", "-m", "pytest", str(test_file),
-                 "-v", "--tb=short", "-q", "--no-header"],
+                cmd + [str(test_file), "-v", "--tb=short", "-q", "--no-header"],
                 capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
                 timeout=self.config.verification_timeout_seconds,
                 cwd=cwd,
+                env=env,
             )
             return {
                 "passed": r.returncode == 0,
@@ -189,6 +280,76 @@ class Verifier:
 
     def _ms(self, start: float) -> int:
         return int((time.time() - start) * 1000)
+
+
+# ── env handling ─────────────────────────────────────────────────────────────
+
+# Files we try, in order of *lowest* to *highest* priority. Templates and
+# examples are loaded first so they fill in placeholder values for any var
+# the user hasn't set elsewhere; the real .env files override them.
+# Rationale: a template that says `MONGODB_URI=changeme` is enough to let
+# pydantic-settings instantiate at app import — better than KeyError, even
+# if the value can't actually connect anywhere.
+_DOTENV_CANDIDATES: tuple[str, ...] = (
+    ".env.template",
+    ".env.example",
+    ".env.sample",
+    ".env.dist",
+    ".secrets",
+    ".env.local",
+    ".env.development",
+    ".env.dev",
+    ".env",
+)
+
+
+def _load_dotenv(cwd: Path) -> dict[str, str]:
+    """Merge KEY=VALUE pairs from every dotenv-family file at `cwd`.
+
+    Later files in `_DOTENV_CANDIDATES` override earlier ones, so real
+    `.env` wins over `.env.example`. Minimal in-tree parser — no
+    python-dotenv dependency. Returns {} if nothing readable found.
+    Never raises.
+    """
+    merged: dict[str, str] = {}
+    for name in _DOTENV_CANDIDATES:
+        path = cwd / name
+        if not path.exists():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        merged.update(_parse_dotenv(text))
+    return merged
+
+
+def _parse_dotenv(text: str) -> dict[str, str]:
+    """Parse one dotenv file's contents. Accepts KEY=VALUE, KEY="V", KEY='V'."""
+    out: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        # Allow `export FOO=bar` (some teams write .env this way)
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if not key or not key.replace("_", "").isalnum():
+            continue
+        value = value.strip()
+        # Strip an inline comment that isn't inside quotes
+        if value and value[0] not in ("'", '"'):
+            hash_pos = value.find(" #")
+            if hash_pos != -1:
+                value = value[:hash_pos].rstrip()
+        if (value.startswith('"') and value.endswith('"')) or (
+            value.startswith("'") and value.endswith("'")
+        ):
+            value = value[1:-1]
+        out[key] = value
+    return out
 
 
 # ── targeted violation helpers ────────────────────────────────────────────────
@@ -232,10 +393,57 @@ def _violate_in_range(
 
 
 def _violate_must_raise(src: str, func_name: str) -> str:
-    return _violate_in_range(
-        src, func_name,
-        r'(\s+)(raise \w+)', r'\1# QUELL_VIOLATION \2',
-    )
+    """Replace every `raise X(...)` in func_name with `pass`.
+
+    AST-based — handles multi-line raises and never leaves an empty `if:` block.
+    Commenting out a raise (the old behaviour) produced IndentationError because
+    a bare comment doesn't satisfy Python's block requirement.
+    Replacing with `pass` keeps the syntax valid and breaks the guard so the
+    test's `pytest.raises(...)` no longer triggers.
+    """
+    try:
+        tree = _ast.parse(src)
+    except SyntaxError:
+        return src
+
+    target = None
+    for node in _ast.walk(tree):
+        if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+            if node.name == func_name:
+                target = node
+                break
+    if target is None:
+        return src
+
+    spans: list[tuple[int, int]] = []
+    for node in _ast.walk(target):
+        if isinstance(node, _ast.Raise):
+            start = node.lineno - 1
+            end = (node.end_lineno or node.lineno) - 1
+            spans.append((start, end))
+        elif isinstance(node, _ast.Assert):
+            # `assert condition` raises AssertionError when False.
+            # Replace with pass so the CUSTOM guard violation is visible.
+            start = node.lineno - 1
+            end = (node.end_lineno or node.lineno) - 1
+            spans.append((start, end))
+    if not spans:
+        return src
+
+    lines = src.splitlines(keepends=True)
+    for start, end in sorted(spans, key=lambda s: -s[0]):
+        if start >= len(lines):
+            continue
+        line = lines[start]
+        indent = line[: len(line) - len(line.lstrip())]
+        if line.endswith("\r\n"):
+            eol = "\r\n"
+        elif line.endswith("\n"):
+            eol = "\n"
+        else:
+            eol = ""
+        lines[start:end + 1] = [f"{indent}pass  # QUELL_VIOLATION{eol}"]
+    return "".join(lines)
 
 
 def _violate_boundary(src: str, func_name: str) -> str:
@@ -253,4 +461,17 @@ def _violate_must_return(src: str, func_name: str) -> str:
         r'return (?!None\b)',
         'return None  # QUELL_VIOLATION ',
         count=0,
+    )
+
+
+def _violate_silent_fail(src: str, func_name: str) -> str:
+    # Change the first silent return to a raise so the gap test fails.
+    # Matches both `return None` and bare `return` (which also returns None implicitly).
+    # The lookahead (?=\s*(?:#[^\n]*)?\n|$) ensures we only match at end-of-line
+    # so we don't accidentally mangle `return something_else`.
+    return _violate_in_range(
+        src, func_name,
+        r'\breturn(?:\s+None\b|\s*(?=#[^\n]*\n|\n|$))',
+        'raise ValueError("quell_violation")',
+        count=1,
     )

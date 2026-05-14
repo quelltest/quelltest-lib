@@ -89,7 +89,14 @@ class TestRuleEnginePipeline:
         assert must_raise
 
         engine = RuleEngine()
-        test = engine.generate(must_raise[0])
+        # _all_required_unknown skips requirements whose only param is a complex
+        # object type (e.g. PaymentRequest). Iterate to find first generatable one.
+        test = None
+        for r in must_raise:
+            t = engine.generate(r)
+            if t is not None:
+                test = t
+                break
         assert test is not None
         assert test.test_function_name.startswith("test_quell_")
         assert test.generated_by == "rule_engine"
@@ -105,12 +112,20 @@ class TestVerifierIntegration:
 
         reqs = DocstringReader().read(sample_payments_path)
         must_raise = [r for r in reqs if r.constraint_kind == ConstraintKind.MUST_RAISE]
-        req = must_raise[0]
-        req.target_file = src
 
         engine = RuleEngine()
-        test = engine.generate(req)
+        # Pick first requirement that can be generated (skips unknown-type-only params)
+        req = None
+        test = None
+        for r in must_raise:
+            t = engine.generate(r)
+            if t is not None:
+                req = r
+                test = t
+                break
         assert test is not None
+        assert req is not None
+        req.target_file = src
 
         original_content = src.read_text()
         verifier = Verifier(e2e_config)

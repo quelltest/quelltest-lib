@@ -118,14 +118,26 @@ def inspect(func_name: str, source_file: Path) -> FuncSignature | None:
             if node.name == func_name:
                 return _extract(node, class_name=None)
 
-    # Class methods
+    # Class methods — prefer concrete (non-abstract) over abstract stubs.
+    # When BaseAdapter.send is `raise NotImplementedError` and HTTPAdapter.send
+    # is the real implementation, we want HTTPAdapter, not BaseAdapter.
+    abstract_fallback: tuple[ast.FunctionDef | ast.AsyncFunctionDef, str] | None = None
     for cls_node in ast.walk(tree):
-        if isinstance(cls_node, ast.ClassDef):
-            for item in cls_node.body:
-                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    if item.name == func_name:
-                        return _extract(item, class_name=cls_node.name)
+        if not isinstance(cls_node, ast.ClassDef):
+            continue
+        for item in cls_node.body:
+            if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if item.name != func_name:
+                continue
+            if _is_abstract_stub(item):
+                if abstract_fallback is None:
+                    abstract_fallback = (item, cls_node.name)
+            else:
+                return _extract(item, class_name=cls_node.name)
 
+    if abstract_fallback:
+        return _extract(abstract_fallback[0], class_name=abstract_fallback[1])
     return None
 
 
@@ -323,3 +335,24 @@ def _stub_param(p: ParamInfo) -> tuple[str, list[str], list[str]]:
     # Truly unknown custom type — use None, track in unknown_list for report
     unknown_list = [ann] if ann else []
     return "None", [], unknown_list
+
+
+def _is_abstract_stub(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> bool:
+    """Return True if the function body is just `raise NotImplementedError`.
+
+    Used to skip abstract base class methods and prefer concrete subclass
+    implementations when multiple methods share the same name in a file.
+    """
+    real = [n for n in node.body if not isinstance(n, (ast.Expr, ast.Pass))]
+    if len(real) != 1 or not isinstance(real[0], ast.Raise):
+        return False
+    exc = real[0].exc
+    if exc is None:
+        return False
+    # raise NotImplementedError  OR  raise NotImplementedError(...)
+    name = exc.id if isinstance(exc, ast.Name) else (
+        exc.func.id if isinstance(exc, ast.Call) and isinstance(exc.func, ast.Name) else None
+    )
+    return name == "NotImplementedError"

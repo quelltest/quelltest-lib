@@ -46,6 +46,17 @@ Pattern 9: hardcoded values in conditions
   if status == "admin":   # magic string
   → MAGIC_VALUE smell: hardcoded string in condition
 
+Pattern A: try/except with re-raise (universal pattern)
+  try:
+      result = parse(value)
+  except ValueError:
+      raise TypeError("invalid input")
+  → MUST_RAISE requirement: raises TypeError on bad input
+
+Pattern B: standalone raise in function body
+  raise NotImplementedError("subclasses must override")
+  → MUST_RAISE requirement: function always raises
+
 Returns [] on any error — never raises.
 No LLM. Pure AST. Works on every Python file.
 """
@@ -53,10 +64,24 @@ from __future__ import annotations
 
 import ast
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 from quell.core.models import ConstraintKind, Requirement, SpecSource
+
+
+def _exc_name(node: ast.expr | None) -> str:
+    """Return a readable exception class name from an AST node."""
+    if node is None:
+        return "Exception"
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr  # e.g. Model.DoesNotExist → "DoesNotExist"
+    if isinstance(node, ast.Call):
+        return _exc_name(node.func)  # raise ValueError(...) → "ValueError"
+    return "Exception"
 
 
 class CodeGuardReader:
@@ -75,12 +100,38 @@ class CodeGuardReader:
             return []
 
         requirements: list[Requirement] = []
-        for node in ast.walk(tree):
+        # Only scan module-level and direct class-method functions.
+        # ast.walk would recurse into nested (inner) functions — those can't be
+        # imported directly and their guards are closure-specific, not testable
+        # in isolation. Guards *inside* nested functions are also excluded from
+        # their outer function's scan (see _walk_func_body).
+        for node in tree.body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                requirements.extend(
-                    self._scan_function(node, file_path, source)
-                )
+                requirements.extend(self._scan_function(node, file_path, source))
+            elif isinstance(node, ast.ClassDef):
+                for item in node.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        requirements.extend(self._scan_function(item, file_path, source))
         return requirements
+
+    @staticmethod
+    def _walk_func_body(
+        func: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> Iterator[ast.AST]:
+        """Yield all AST nodes inside func without descending into nested functions.
+
+        ast.walk recurses into every node including inner function definitions,
+        which causes guards inside nested functions to be mis-attributed to the
+        outer function and makes the inner function appear as a top-level target.
+        This iterator stops at nested FunctionDef/AsyncFunctionDef boundaries.
+        """
+        from collections import deque
+        todo: deque[ast.AST] = deque(ast.iter_child_nodes(func))
+        while todo:
+            node = todo.popleft()
+            yield node
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                todo.extend(ast.iter_child_nodes(node))
 
     def _scan_function(
         self,
@@ -88,10 +139,26 @@ class CodeGuardReader:
         path: Path,
         source: str,
     ) -> list[Requirement]:
+        # Skip pure abstract stubs — entire body is `raise NotImplementedError`.
+        # These are interface contracts, not testable guards: subclasses implement
+        # them and the raise is intentional boilerplate, not a guard to verify.
+        real_body = [n for n in func.body if not isinstance(n, (ast.Expr, ast.Pass))]
+        if (
+            len(real_body) == 1
+            and isinstance(real_body[0], ast.Raise)
+            and real_body[0].exc is not None
+            and _exc_name(real_body[0].exc) in ("NotImplementedError", "AbstractMethodError")
+        ):
+            return []
+
         reqs: list[Requirement] = []
         lines = source.splitlines()
 
-        for node in ast.walk(func):
+        # Track raises already claimed by an if/raise pattern so we don't
+        # double-count them as "standalone" raises below.
+        claimed_raise_linenos: set[int] = set()
+
+        for node in self._walk_func_body(func):
             # Pattern 1, 2, 3, 5, 6: if <condition>: raise
             if isinstance(node, ast.If):
                 raise_nodes = [
@@ -99,6 +166,7 @@ class CodeGuardReader:
                     if isinstance(n, ast.Raise)
                 ]
                 if raise_nodes:
+                    claimed_raise_linenos.add(raise_nodes[0].lineno)
                     req = self._classify_if_raise(
                         node, raise_nodes[0], func, path, lines
                     )
@@ -116,10 +184,30 @@ class CodeGuardReader:
                 if req:
                     reqs.append(req)
 
-            # Pattern 7: bare except
+            # Pattern 7: bare except  |  Pattern A: typed except with re-raise
             elif isinstance(node, ast.ExceptHandler):
-                if node.type is None:  # bare except:
+                if node.type is None:
                     reqs.append(self._bare_except_smell(node, func, path, lines))
+                else:
+                    # except SomeError: raise OtherError(...)  → guard clause
+                    raise_nodes = [n for n in node.body if isinstance(n, ast.Raise)]
+                    if raise_nodes:
+                        claimed_raise_linenos.add(raise_nodes[0].lineno)
+                        req = self._classify_except_raise(node, raise_nodes[0], func, path, lines)
+                        if req:
+                            reqs.append(req)
+
+            # Pattern B: standalone raise not inside an if/except body
+            elif isinstance(node, ast.Raise) and node.exc is not None:
+                if node.lineno not in claimed_raise_linenos:
+                    # Only pick up raises that are direct statements in the
+                    # function body (depth 1) — nested raises inside loops,
+                    # comprehensions, etc. are too noisy.
+                    if node in func.body:
+                        claimed_raise_linenos.add(node.lineno)
+                        req = self._classify_standalone_raise(node, func, path, lines)
+                        if req:
+                            reqs.append(req)
 
         return reqs
 
@@ -144,6 +232,7 @@ class CodeGuardReader:
                 target_function=func.name,
                 target_file=path,
                 raw_spec_text=raw,
+                source_line=if_node.lineno,
                 violation_input=self._extract_null_input(test),
             )
 
@@ -157,6 +246,7 @@ class CodeGuardReader:
                 target_function=func.name,
                 target_file=path,
                 raw_spec_text=raw,
+                source_line=if_node.lineno,
                 violation_input=self._extract_boundary_input(test),
             )
 
@@ -170,6 +260,7 @@ class CodeGuardReader:
                 target_function=func.name,
                 target_file=path,
                 raw_spec_text=raw,
+                source_line=if_node.lineno,
                 violation_input=self._extract_enum_input(test),
             )
 
@@ -183,6 +274,7 @@ class CodeGuardReader:
                 target_function=func.name,
                 target_file=path,
                 raw_spec_text=raw,
+                source_line=if_node.lineno,
             )
 
         # Pattern 6: auth/permission check
@@ -195,6 +287,7 @@ class CodeGuardReader:
                 target_function=func.name,
                 target_file=path,
                 raw_spec_text=raw,
+                source_line=if_node.lineno,
             )
 
         # Pattern 9: magic value check
@@ -207,6 +300,7 @@ class CodeGuardReader:
                 target_function=func.name,
                 target_file=path,
                 raw_spec_text=raw,
+                source_line=if_node.lineno,
             )
 
         # Generic if/raise we couldn't classify specifically
@@ -218,6 +312,7 @@ class CodeGuardReader:
             target_function=func.name,
             target_file=path,
             raw_spec_text=raw,
+            source_line=if_node.lineno,
         )
 
     def _classify_assert(
@@ -237,6 +332,7 @@ class CodeGuardReader:
                 target_function=func.name,
                 target_file=path,
                 raw_spec_text=raw,
+                source_line=node.lineno,
             )
         return Requirement(
             id=str(uuid.uuid4())[:8],
@@ -246,6 +342,7 @@ class CodeGuardReader:
             target_function=func.name,
             target_file=path,
             raw_spec_text=raw,
+            source_line=node.lineno,
         )
 
     def _classify_silent_failure(
@@ -269,6 +366,7 @@ class CodeGuardReader:
                     target_function=func.name,
                     target_file=path,
                     raw_spec_text=raw,
+                    source_line=if_node.lineno,
                 )
         return None
 
@@ -288,6 +386,51 @@ class CodeGuardReader:
             target_function=func.name,
             target_file=path,
             raw_spec_text=raw,
+            source_line=node.lineno,
+        )
+
+    def _classify_except_raise(
+        self,
+        handler: ast.ExceptHandler,
+        raise_node: ast.Raise,
+        func: ast.FunctionDef | ast.AsyncFunctionDef,
+        path: Path,
+        lines: list[str],
+    ) -> Requirement | None:
+        """Pattern A: except SomeError: raise OtherError — guard that converts exceptions."""
+        caught = _exc_name(handler.type)
+        raised = _exc_name(raise_node.exc) if raise_node.exc else caught
+        raw = lines[handler.lineno - 1].strip() if handler.lineno <= len(lines) else f"except {caught}:"
+        return Requirement(
+            id=str(uuid.uuid4())[:8],
+            description=f"raises {raised} when {caught} occurs — {raw}",
+            constraint_kind=ConstraintKind.MUST_RAISE,
+            source=SpecSource.CODE_GUARD,
+            target_function=func.name,
+            target_file=path,
+            raw_spec_text=raw,
+            source_line=handler.lineno,
+        )
+
+    def _classify_standalone_raise(
+        self,
+        raise_node: ast.Raise,
+        func: ast.FunctionDef | ast.AsyncFunctionDef,
+        path: Path,
+        lines: list[str],
+    ) -> Requirement | None:
+        """Pattern B: raise X(...) as a direct statement in the function body."""
+        raised = _exc_name(raise_node.exc) if raise_node.exc else "Exception"
+        raw = lines[raise_node.lineno - 1].strip() if raise_node.lineno <= len(lines) else f"raise {raised}"
+        return Requirement(
+            id=str(uuid.uuid4())[:8],
+            description=f"always raises {raised} — {raw}",
+            constraint_kind=ConstraintKind.MUST_RAISE,
+            source=SpecSource.CODE_GUARD,
+            target_function=func.name,
+            target_file=path,
+            raw_spec_text=raw,
+            source_line=raise_node.lineno,
         )
 
     # ── helpers ─────────────────────────────────────────────────────────────

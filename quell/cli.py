@@ -42,7 +42,7 @@ app.add_typer(auth_app, name="auth")
 console = Console()
 
 # GitHub Actions workflow template — written by `quell install --pr`
-GITHUB_ACTION_YAML = """name: Quell — Requirement Coverage
+GITHUB_ACTION_YAML = """name: Quell — Guard Clause Scan
 
 on:
   pull_request:
@@ -56,82 +56,17 @@ permissions:
 
 jobs:
   quell:
-    name: Quell requirement coverage
+    name: Quell guard clause scan
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Scan for untested guard clauses
+        uses: shashank7109/quelltest_lib@main
         with:
-          fetch-depth: 0
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install Quell
-        run: pip install quelltest
-
-      - name: Run Quell
-        id: quell
-        env:
-          QUELL_API_KEY: ${{ secrets.QUELL_API_KEY }}
-        run: |
-          quell check --diff-only --no-llm --format json > quell_report.json || true
-          echo "done=true" >> $GITHUB_OUTPUT
-
-      - name: Post PR comment
-        if: steps.quell.outputs.done == 'true'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            let report;
-            try {
-              report = JSON.parse(fs.readFileSync('quell_report.json', 'utf8'));
-            } catch(e) { return; }
-
-            const total = report.total_requirements || 0;
-            if (total === 0) return;
-
-            const gaps = report.gaps || [];
-            const score = report.score || 0;
-            const emoji = score >= 0.8 ? '🟢' : score >= 0.5 ? '🟡' : '🔴';
-
-            let body = `## ${emoji} Quell Report\\n\\n`;
-            const covered = total - gaps.length;
-            body += `**Coverage: ${Math.round(score * 100)}%** (${covered}/${total} tested)\\n\\n`;
-
-            if (gaps.length === 0) {
-              body += `✅ All requirements in changed files are tested.\\n`;
-            } else {
-              body += `**${gaps.length} untested requirement${gaps.length > 1 ? 's' : ''}:**\\n\\n`;
-              body += `| File | Function | Requirement | Type |\\n`;
-              body += `|------|----------|-------------|------|\\n`;
-              for (const g of gaps.slice(0, 10)) {
-                body += `| \\`${g.file}\\` | \\`${g.function}\\` | ${g.description} | ${g.kind} |\\n`;
-              }
-              if (gaps.length > 10) {
-                body += `\\n_...and ${gaps.length - 10} more. Run \\`quell check --fix\\` locally._\\n`;
-              }
-              body += `\\n**Fix locally:** \\`quell check src/ --fix\\`\\n`;
-            }
-            body += `\\n<sub>Quell • no code sent anywhere • [quell.buildsbyshashank.tech](https://quell.buildsbyshashank.tech)</sub>`;
-
-            const { data: comments } = await github.rest.issues.listComments({
-              owner: context.repo.owner, repo: context.repo.repo,
-              issue_number: context.issue.number,
-            });
-            const existing = comments.find(c => c.body.includes('Quell Report'));
-            if (existing) {
-              await github.rest.issues.updateComment({
-                owner: context.repo.owner, repo: context.repo.repo,
-                comment_id: existing.id, body,
-              });
-            } else {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner, repo: context.repo.repo,
-                issue_number: context.issue.number, body,
-              });
-            }
+          target: '.'
+          post-comment: 'true'
+          fail-on-gaps: 'false'
 """
 
 
@@ -215,6 +150,7 @@ def cmd_scan(
     llm: bool = typer.Option(False, "--llm", help="Enable LLM for guard types the rule engine can't handle"),
     no_llm: bool = typer.Option(False, "--no-llm", help="[deprecated] Rule-based only, no LLM (now the default)"),
     project_root: Path = typer.Option(Path("."), "--root"),
+    fmt: str = typer.Option("console", "--format", "-f", help="Output format: console or github"),
 ) -> None:
     """
     Scan production code for untested logic gaps.
@@ -232,9 +168,14 @@ def cmd_scan(
     from quell.core.models import VerificationStatus
     from quell.coverage.checker import CoverageChecker
     from quell.spec.code_guard_reader import CodeGuardReader
+    from quell.synthesis.app_locator import find_app
+    from quell.synthesis.framework_detector import detect_route
+    from quell.synthesis.framework_engine import FrameworkEngine
     from quell.synthesis.rule_engine import RuleEngine
 
     config = _load_config(project_root)
+    app_info = find_app(project_root)
+    framework_engine = FrameworkEngine()
 
     files = (
         [
@@ -247,11 +188,20 @@ def cmd_scan(
         if target.is_dir() else [target]
     )
 
-    console.print(Panel.fit(
-        f"[bold blue]Quell Scan[/bold blue] — "
-        f"reading guard clauses in {len(files)} file(s)\n"
-        "[dim]No docstrings needed. Reading your if/raise patterns.[/dim]"
-    ))
+    if fmt != "github":
+        if app_info is not None:
+            app_line = (
+                f"\n[dim]Framework: {app_info.framework} app "
+                f"`{app_info.attr_name}` in {app_info.module_path}[/dim]"
+            )
+        else:
+            app_line = ""
+        console.print(Panel.fit(
+            f"[bold blue]Quell Scan[/bold blue] — "
+            f"reading guard clauses in {len(files)} file(s)\n"
+            "[dim]No docstrings needed. Reading your if/raise patterns.[/dim]"
+            f"{app_line}"
+        ))
 
     reader = CodeGuardReader()
     checker = CoverageChecker(project_root)
@@ -262,45 +212,61 @@ def cmd_scan(
         all_requirements.extend(reader.read(f))
 
     if not all_requirements:
-        console.print("[yellow]No guard clauses found.[/yellow]")
-        console.print(
-            "[dim]Quell reads if/raise patterns. "
-            "If your code has no guard clauses, nothing to check.[/dim]"
-        )
+        if fmt == "github":
+            print("::notice::Quell: No guard clauses found in scanned files.")
+        else:
+            console.print("[yellow]No guard clauses found.[/yellow]")
+            console.print(
+                "[dim]Quell reads if/raise patterns. "
+                "If your code has no guard clauses, nothing to check.[/dim]"
+            )
         return
 
     all_requirements = checker.check(all_requirements)
     gaps = [r for r in all_requirements if not r.is_covered]
 
-    table = Table(
-        title=f"Logic Gaps Found ({len(gaps)} untested / {len(all_requirements)} total)"
-    )
-    table.add_column("File", style="blue")
-    table.add_column("Function", style="cyan")
-    table.add_column("Guard Clause", style="white")
-    table.add_column("Type", style="magenta")
-    table.add_column("Method", style="dim")
-
-    for req in gaps:
-        table.add_row(
-            req.target_file.name,
-            req.target_function,
-            (req.raw_spec_text or req.description)[:50],
-            req.constraint_kind.value,
-            "[dim][rule-based, no network][/dim]",
+    if fmt == "github":
+        # Emit GitHub Actions workflow commands for inline PR annotations
+        for req in gaps:
+            line_part = f",line={req.source_line}" if req.source_line else ""
+            guard_text = (req.raw_spec_text or req.description)
+            guard_text = guard_text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+            title = f"Untested guard [{req.constraint_kind.value}] in {req.target_function}()"
+            print(f"::warning file={req.target_file}{line_part},title={title}::{guard_text}")
+        if not gaps:
+            print(f"::notice::Quell: All {len(all_requirements)} guard clauses are tested.")
+    else:
+        table = Table(
+            title=f"Logic Gaps Found ({len(gaps)} untested / {len(all_requirements)} total)"
         )
+        table.add_column("File", style="blue")
+        table.add_column("Function", style="cyan")
+        table.add_column("Guard Clause", style="white")
+        table.add_column("Type", style="magenta")
+        table.add_column("Method", style="dim")
 
-    console.print(table)
+        for req in gaps:
+            table.add_row(
+                req.target_file.name,
+                req.target_function,
+                (req.raw_spec_text or req.description)[:50],
+                req.constraint_kind.value,
+                "[dim][rule-based, no network][/dim]",
+            )
+
+        console.print(table)
 
     if not gaps:
-        console.print("[green]All guard clauses are tested.[/green]")
+        if fmt != "github":
+            console.print("[green]All guard clauses are tested.[/green]")
         return
 
     if not fix:
-        console.print(
-            f"\n[yellow]Run [bold]quell scan {target} --fix[/bold] "
-            "to generate failing tests.[/yellow]"
-        )
+        if fmt != "github":
+            console.print(
+                f"\n[yellow]Run [bold]quell scan {target} --fix[/bold] "
+                "to generate failing tests.[/yellow]"
+            )
         # Still write detection-only report
         detection_items = [
             {
@@ -308,13 +274,14 @@ def cmd_scan(
                 "file": str(r.target_file),
                 "guard": r.raw_spec_text or r.description,
                 "type": r.constraint_kind.value,
+                "line": r.source_line,
                 "outcome": "detected_not_fixed",
                 "reason": "",
                 "generated_test": None,
             }
             for r in gaps
         ]
-        _write_scan_report(project_root, str(target), all_requirements, gaps, detection_items, 0)
+        _write_scan_report(project_root, str(target), all_requirements, gaps, detection_items, 0, fmt)
         return
 
     # Generate tests + optional fix suggestions
@@ -361,20 +328,37 @@ def cmd_scan(
             "generated_test": None,
         }
 
-        if rule_engine.can_handle(req):
+        # Route framework handlers through the framework engine first —
+        # rule-engine stubs can't drive Depends() / TestClient.
+        route = detect_route(req.target_function, req.target_file)
+        if route is not None:
+            item["type"] = f"{req.constraint_kind.value} (framework:{route.framework})"
+            if framework_engine.can_handle(route, app_info):
+                assert app_info is not None  # can_handle returns False when app_info is None
+                candidate = framework_engine.generate(req, route, app_info)
+                generated_by_tag = "[dim][framework, TestClient][/dim]"
+                if candidate is None:
+                    item["outcome"] = "skipped_framework_unsupported"
+                    item["reason"] = f"{route.framework} route — engine couldn't synthesize"
+                    console.print(f"  [dim]Skipped — {item['reason']}[/dim]")
+                    report_items.append(item)
+                    continue
+            else:
+                item["outcome"] = "skipped_framework_no_app"
+                item["reason"] = (
+                    f"{route.framework} route detected but no app object "
+                    "(FastAPI/Flask instance) found in project — can't build TestClient"
+                )
+                console.print(f"  [dim]Skipped — {item['reason']}[/dim]")
+                report_items.append(item)
+                continue
+        elif rule_engine.can_handle(req):
             candidate = rule_engine.generate(req)
             generated_by_tag = "[dim][rule-based, no network][/dim]"
             if candidate is None:
-                # Determine reason: async, self.attr, or local variable
-                from quell.synthesis import sig_inspector as _si
-                _sig = _si.inspect(req.target_function, req.target_file)
-                if _sig and _sig.is_async:
-                    item["outcome"] = "skipped_async"
-                    item["reason"] = (
-                        "async def function — sync stub calls return a coroutine, "
-                        "not an exception. Test via pytest-asyncio + real fixtures."
-                    )
-                elif "self." in (req.raw_spec_text or ""):
+                # Async is now handled via asyncio.run wrap; only structural
+                # reasons cause a None return: self.attr or local variable.
+                if "self." in (req.raw_spec_text or ""):
                     item["outcome"] = "skipped_local_var"
                     item["reason"] = "guard checks self.attr — needs class instantiation"
                 else:
@@ -452,7 +436,7 @@ def cmd_scan(
             if write:
                 if writer.write(candidate, req.id):
                     console.print(
-                        f"  [green]Test written to {candidate.test_file_path.name}[/green]"
+                        f"  [green]Test written → {candidate.test_file_path}[/green]"
                     )
                     fixed += 1
 
@@ -464,10 +448,15 @@ def cmd_scan(
             )
         elif result.status == VerificationStatus.FAILS_ON_CORRECT:
             item["outcome"] = "rejected_fails_on_correct"
-            item["reason"] = (
+            # Surface the first meaningful line of the pytest output so the
+            # diagnostic report shows the REAL failure (ImportError, missing
+            # env var, app startup error, etc.) instead of a generic blurb.
+            err_snippet = _summarize_pytest_failure(result.error_message or "")
+            item["reason"] = err_snippet or (
                 "generated stub args trigger a different error on valid code — "
                 "function likely has complex/Pydantic args or depends on self state"
             )
+            item["pytest_output"] = (result.error_message or "")[-2000:]
             console.print(
                 f"  [red]Rejected — generated stub breaks valid code[/red] "
                 f"[dim](guard: {(req.raw_spec_text or '')[:50]!r})[/dim]"
@@ -480,7 +469,28 @@ def cmd_scan(
         report_items.append(item)
 
     # Always write report
-    _write_scan_report(project_root, str(target), all_requirements, gaps, report_items, fixed)
+    _write_scan_report(project_root, str(target), all_requirements, gaps, report_items, fixed, fmt)
+
+
+def _summarize_pytest_failure(out: str) -> str:
+    """Pull the most informative one-liner out of pytest's --tb=short output.
+
+    Looks for, in order: ModuleNotFoundError / ImportError / E lines / the
+    short test summary info. Falls back to the last non-empty line.
+    """
+    if not out:
+        return ""
+    lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    for ln in lines:
+        if ln.startswith(("ModuleNotFoundError", "ImportError", "AttributeError")):
+            return ln[:180]
+    for ln in lines:
+        if ln.startswith("E   ") and "assert" not in ln:
+            return ln[4:][:180]
+    for ln in lines:
+        if "Error" in ln and ":" in ln:
+            return ln[:180]
+    return lines[-1][:180] if lines else ""
 
 
 def _write_scan_report(
@@ -490,6 +500,7 @@ def _write_scan_report(
     gaps: list[Any],
     items: list[dict[str, Any]],
     written: int,
+    fmt: str = "console",
 ) -> None:
     """Write quell-report.json to project_root. Always called at end of scan."""
     import datetime
@@ -498,6 +509,7 @@ def _write_scan_report(
     from quell import __version__
 
     outcomes = [it["outcome"] for it in items]
+    framework_items = [it for it in items if "framework" in it.get("type", "")]
     summary = {
         "total_requirements": len(all_requirements),
         "gaps_found": len(gaps),
@@ -508,6 +520,9 @@ def _write_scan_report(
         "skipped_async": outcomes.count("skipped_async"),
         "skipped_local_var": outcomes.count("skipped_local_var"),
         "skipped_no_gen": outcomes.count("skipped_no_gen"),
+        "framework_routes_detected": len(framework_items),
+        "skipped_framework_no_app": outcomes.count("skipped_framework_no_app"),
+        "skipped_framework_unsupported": outcomes.count("skipped_framework_unsupported"),
     }
     report = {
         "quell_version": __version__,
@@ -519,14 +534,24 @@ def _write_scan_report(
     report_path = project_root / "quell-report.json"
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
 
-    console.print(f"\n[dim]Report written → {report_path}[/dim]")
+    if fmt == "github":
+        # In GitHub Actions mode, only emit machine-readable output to stdout.
+        # The report path is available via the action's output variable.
+        return
+
+    console.print(f"\n[dim]Report written to {report_path}[/dim]")
     console.print(
         f"  verified={summary['verified_and_written']}  "
         f"rejected={summary['rejected_fails_on_correct']}  "
-        f"skipped_async={summary['skipped_async']}  "
         f"skipped_local_var={summary['skipped_local_var']}  "
         f"skipped_no_rule={summary['skipped_no_rule']}"
     )
+    if summary["framework_routes_detected"]:
+        console.print(
+            f"  framework_routes={summary['framework_routes_detected']}  "
+            f"skipped_no_app={summary['skipped_framework_no_app']}  "
+            f"skipped_unsupported={summary['skipped_framework_unsupported']}"
+        )
     if summary["rejected_fails_on_correct"] > 0:
         console.print(
             "  [dim]Tip: share quell-report.json with the Quell maintainer "

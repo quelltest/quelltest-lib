@@ -58,6 +58,7 @@ class Requirement(BaseModel):
     violation_input: dict[str, Any] | None = None
     expected_behavior: str | None = None
     raw_spec_text: str | None = None
+    source_line: int | None = None
     is_covered: bool = False
     covering_tests: list[str] = Field(default_factory=list)
 

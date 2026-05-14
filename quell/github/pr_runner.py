@@ -110,17 +110,16 @@ class GitHubPRRunner:
         r.raise_for_status()
         return base64.b64decode(r.json()["content"]).decode("utf-8")
 
-    def run_quell_on_pr(self, config: Any) -> dict[str, Any]:
+    def run_quell_on_pr(self, config: Any = None) -> dict[str, Any]:
         """
         Main entry point.
-        1. Fetch PR info and changed files
+        1. Fetch PR info and changed files via GitHub API
         2. Write changed files to a temp directory
-        3. Run Quell spec readers on them
-        4. Return structured report
+        3. Run CodeGuardReader on them (reads if/raise patterns — no annotations needed)
+        4. Return structured report dict
         """
         from quell.coverage.checker import CoverageChecker
-        from quell.spec.docstring_reader import DocstringReader
-        from quell.spec.type_reader import TypeReader
+        from quell.spec.code_guard_reader import CodeGuardReader
 
         pr_info = self.get_pr_info()
         head_sha = pr_info["head"]["sha"]
@@ -137,6 +136,7 @@ class GitHubPRRunner:
             }
 
         all_requirements = []
+        reader = CodeGuardReader()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_root = Path(tmpdir)
@@ -147,14 +147,7 @@ class GitHubPRRunner:
                     tmp_file = tmp_root / file_path
                     tmp_file.parent.mkdir(parents=True, exist_ok=True)
                     tmp_file.write_text(content)
-
-                    if config.enable_docstring:
-                        all_requirements.extend(DocstringReader().read(tmp_file))
-                    if config.enable_types:
-                        all_requirements.extend(TypeReader().read(tmp_file))
-                    if config.enable_pyspark:
-                        from quell.spec.pyspark_reader import PySparkReader
-                        all_requirements.extend(PySparkReader().read(tmp_file))
+                    all_requirements.extend(reader.read(tmp_file))
                 except Exception:
                     continue
 
@@ -180,6 +173,7 @@ class GitHubPRRunner:
                     "description": r.description,
                     "kind": r.constraint_kind.value,
                     "source": r.source.value,
+                    "line": r.source_line,
                 }
                 for r in gaps
             ],

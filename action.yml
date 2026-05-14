@@ -1,0 +1,173 @@
+name: 'Quell — Guard Clause Scanner'
+description: >
+  Scans Python code for untested guard clauses (if/raise, try/except/raise,
+  assert patterns). Rule-based — no LLM, no API key, no code leaves the runner.
+author: 'Shashank Bindal'
+
+branding:
+  icon: 'shield'
+  color: 'blue'
+
+inputs:
+  target:
+    description: 'File or directory to scan (relative to repo root)'
+    required: false
+    default: '.'
+
+  python-version:
+    description: 'Python version to use for running Quell'
+    required: false
+    default: '3.11'
+
+  post-comment:
+    description: 'Post scan results as a PR comment (requires pull-requests: write permission)'
+    required: false
+    default: 'true'
+
+  fail-on-gaps:
+    description: 'Exit with code 1 if any untested guard clauses are found'
+    required: false
+    default: 'false'
+
+  github-token:
+    description: 'GitHub token for posting PR comments'
+    required: false
+    default: '${{ github.token }}'
+
+outputs:
+  gaps-found:
+    description: 'Number of untested guard clauses found'
+    value: ${{ steps.parse-report.outputs.gaps_found }}
+
+  total-guards:
+    description: 'Total number of guard clauses detected'
+    value: ${{ steps.parse-report.outputs.total_guards }}
+
+  report-path:
+    description: 'Path to the JSON report file'
+    value: quell-report.json
+
+runs:
+  using: 'composite'
+
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install Quell
+      shell: bash
+      run: pip install --quiet quelltest
+
+    - name: Run Quell scan
+      shell: bash
+      # --format github emits ::warning annotations visible inline in the PR diff.
+      # The report JSON is always written to quell-report.json regardless of format.
+      run: |
+        quell scan "${{ inputs.target }}" --format github || true
+
+    - name: Parse report
+      id: parse-report
+      shell: bash
+      run: |
+        if [ -f quell-report.json ]; then
+          GAPS=$(python -c "import json,sys; d=json.load(open('quell-report.json')); print(d.get('summary',{}).get('gaps_found',0))" 2>/dev/null || echo 0)
+          TOTAL=$(python -c "import json,sys; d=json.load(open('quell-report.json')); print(d.get('summary',{}).get('total_requirements',0))" 2>/dev/null || echo 0)
+        else
+          GAPS=0
+          TOTAL=0
+        fi
+        echo "gaps_found=$GAPS" >> $GITHUB_OUTPUT
+        echo "total_guards=$TOTAL" >> $GITHUB_OUTPUT
+
+    - name: Post PR comment
+      if: >
+        inputs.post-comment == 'true' &&
+        github.event_name == 'pull_request' &&
+        hashFiles('quell-report.json') != ''
+      uses: actions/github-script@v7
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          const fs = require('fs');
+          let report;
+          try {
+            report = JSON.parse(fs.readFileSync('quell-report.json', 'utf8'));
+          } catch (e) {
+            console.log('quell-report.json not found or invalid, skipping comment');
+            return;
+          }
+
+          const summary = report.summary || {};
+          const gaps = summary.gaps_found || 0;
+          const total = summary.total_requirements || 0;
+          const covered = total - gaps;
+          const version = report.quell_version || '';
+
+          if (total === 0) return;
+
+          const marker = '<!-- quell-guard-scan -->';
+          const emoji = gaps === 0 ? '🟢' : gaps < 5 ? '🟡' : '🔴';
+          let body = `${marker}\n## ${emoji} Quell — Guard Clause Scan\n\n`;
+
+          if (gaps === 0) {
+            body += `✅ **All ${total} guard clause${total !== 1 ? 's' : ''} are tested.**\n`;
+          } else {
+            const pct = total > 0 ? Math.round(covered / total * 100) : 100;
+            body += `**${gaps} untested guard clause${gaps !== 1 ? 's' : ''} found** — `;
+            body += `${pct}% covered (${covered}/${total})\n\n`;
+
+            const gapItems = (report.results || []).filter(r => r.outcome === 'detected_not_fixed');
+            if (gapItems.length > 0) {
+              body += `| File | Function | Guard | Type |\n`;
+              body += `|------|----------|-------|------|\n`;
+              for (const g of gapItems.slice(0, 15)) {
+                const fname = (g.file || '').split(/[/\\]/).pop();
+                const lineRef = g.line ? `:${g.line}` : '';
+                const guard = (g.guard || '').slice(0, 60).replace(/\|/g, '\\|');
+                body += `| \`${fname}${lineRef}\` | \`${g.function}\` | ${guard} | \`${g.type}\` |\n`;
+              }
+              if (gapItems.length > 15) {
+                body += `\n_...and ${gapItems.length - 15} more._\n`;
+              }
+            }
+            body += `\n**Fix locally:** \`quell scan . --fix\`\n`;
+          }
+
+          body += `\n---\n`;
+          body += `*[Quell](https://quell.buildsbyshashank.tech)${version ? ` v${version}` : ''} `;
+          body += `— rule-based, no code sent anywhere*`;
+
+          const { data: comments } = await github.rest.issues.listComments({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.issue.number,
+          });
+          const existing = comments.find(c => (c.body || '').includes(marker));
+
+          if (existing) {
+            await github.rest.issues.updateComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: existing.id,
+              body,
+            });
+          } else {
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
+          }
+
+    - name: Fail on gaps
+      if: inputs.fail-on-gaps == 'true'
+      shell: bash
+      run: |
+        GAPS="${{ steps.parse-report.outputs.gaps_found }}"
+        if [ "${GAPS:-0}" -gt "0" ]; then
+          echo "::error::Quell found ${GAPS} untested guard clause(s). Run 'quell scan . --fix' locally to generate tests."
+          exit 1
+        fi
