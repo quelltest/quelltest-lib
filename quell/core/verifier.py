@@ -48,6 +48,9 @@ from quell.core.models import (
     VerificationResult,
     VerificationStatus,
 )
+from quell.infra.specs import _assert_no_credential_reads
+
+_assert_no_credential_reads()
 
 
 def _resolve_pytest_cmd() -> list[str]:
