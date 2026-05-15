@@ -244,12 +244,11 @@ class Verifier:
         cwd = self._resolve_cwd(src)
         env = os.environ.copy()
         env.update(_load_dotenv(cwd))
-        # Prepend local source trees to PYTHONPATH so the mutated local copy
-        # shadows any installed version in site-packages. Without this, when
-        # code lives in src/ the violation is injected into src/pkg/module.py
-        # but the test imports the unmodified site-packages version — making
-        # every mutation invisible and producing DOESNT_CATCH_VIOLATION.
         _prepend_src_paths(env, cwd)
+        # Phase 2 isolation: tell generated fixtures to wrap DB calls in a
+        # transaction that rolls back, so Phase 1 and Phase 2 always start
+        # from the same database state (see quell/infra/engine.py).
+        env.setdefault("QUELL_TRANSACTION_ROLLBACK", "false")
         cmd = _resolve_pytest_cmd()
         try:
             r = subprocess.run(
