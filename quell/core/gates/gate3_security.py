@@ -34,7 +34,7 @@ _BANNED_ATTR_CALLS = {
 }
 
 
-def check(test_code: str, ctx: GateContext) -> GateContext | GateResult:  # noqa: ARG001
+def check(test_code: str, ctx: GateContext) -> GateResult:  # noqa: ARG001
     """Gate 3: security checks on the generated test code."""
     # 1. Hardcoded credentials
     if _CRED_PATTERN.search(test_code):
@@ -80,9 +80,10 @@ def check(test_code: str, ctx: GateContext) -> GateContext | GateResult:  # noqa
                     if node.func.value.id in ("requests", "httpx") and node.func.attr in (
                         "get", "post", "put", "patch", "delete", "request", "send",
                     ):
+                        call = f"{node.func.value.id}.{node.func.attr}()"
                         return GateResult(
                             passed=False, gate=3,
-                            reason=f"generated test failed security review: unmocked network call {node.func.value.id}.{node.func.attr}()",
+                            reason=f"generated test failed security review: unmocked network call {call}",
                         )
 
         # 4. os.environ mutations (os.environ['X'] = ... or os.environ.update())

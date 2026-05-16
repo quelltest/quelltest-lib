@@ -151,7 +151,7 @@ def cmd_find(
     target: Path = typer.Argument(Path("."), help="File or directory to scan for untested edge cases"),
     fix: bool = typer.Option(False, "--fix", help="Write tests for confident cases (WRITTEN bucket)"),
     auto: bool = typer.Option(False, "--auto", help="Skip confirmation prompts (for CI)"),
-    use_llm: bool = typer.Option(False, "--use-llm", help="Enable LLM fallback for complex cases (requires quell auth)"),
+    use_llm: bool = typer.Option(False, "--use-llm", help="Enable LLM fallback (requires quell auth)"),
     project_root: Path = typer.Option(Path("."), "--root"),
     fmt: str = typer.Option("console", "--format", "-f", help="Output format: console or github"),
 ) -> None:

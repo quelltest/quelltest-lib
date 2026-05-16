@@ -11,24 +11,24 @@ Caller retries once on failure before routing to FLAGGED.
 from __future__ import annotations
 
 import ast
-import importlib
+import importlib.util
 import sys
 from dataclasses import dataclass
 from typing import Any
+
+from quell.core.models import GateResult
 
 
 @dataclass
 class GateContext:
     """Context passed to every gate."""
+
     target_file: str = ""
     project_root: str = ""
     existing_test_files: list[str] | None = None
     original_source: str = ""
     violated_source: str = ""
     extra: dict[str, Any] | None = None
-
-
-from quell.core.models import GateResult
 
 
 def check(test_code: str, ctx: GateContext) -> GateResult:  # noqa: ARG001
@@ -38,7 +38,6 @@ def check(test_code: str, ctx: GateContext) -> GateResult:  # noqa: ARG001
     except SyntaxError as exc:
         return GateResult(passed=False, gate=1, reason=f"invalid syntax: {exc}")
 
-    # Collect all import names from the top-level of the test module
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -62,7 +61,8 @@ def check(test_code: str, ctx: GateContext) -> GateResult:  # noqa: ARG001
 
 def _can_import(module_name: str) -> bool:
     """Return True if the module can be found in sys.path / stdlib."""
-    if module_name in sys.stdlib_module_names:  # type: ignore[attr-defined]
+    stdlib: frozenset[str] = getattr(sys, "stdlib_module_names", frozenset())
+    if module_name in stdlib:
         return True
     try:
         spec = importlib.util.find_spec(module_name)

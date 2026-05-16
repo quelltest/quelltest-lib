@@ -62,6 +62,10 @@ line-length = 120
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
 
+[tool.ruff.lint.per-file-ignores]
+# Auto-generated quell self-scan stubs — don't enforce import style here
+"quell/tests/*.py" = ["E501", "F401", "F811", "I001", "I002"]
+
 [tool.mypy]
 python_version = "3.11"
 strict = true
