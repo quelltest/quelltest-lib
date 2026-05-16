@@ -49,7 +49,7 @@ def _auth_path() -> Path:
 
 
 def _try_keyring() -> bool:
-    """Return True if the keyring package is available and functional."""
+    """Return True if the keyring package is importable (backend check done at call site)."""
     try:
         import keyring  # noqa: F401
         return True
@@ -64,12 +64,18 @@ def save_credentials(provider: ProviderName, mode: AuthMode, key: str, tier: Tie
 
     creds = Credentials(provider=provider, mode=mode, tier=tier)
 
+    keyring_used = False
     if _try_keyring() and key:
-        import keyring
-        username = f"quell_{provider}_{mode}"
-        keyring.set_password(_KEYRING_SERVICE, username, key)
-        creds.key_ref = username
-    elif key:
+        try:
+            import keyring
+            username = f"quell_{provider}_{mode}"
+            keyring.set_password(_KEYRING_SERVICE, username, key)
+            creds.key_ref = username
+            keyring_used = True
+        except Exception:
+            keyring_used = False
+
+    if not keyring_used and key:
         creds.key_plaintext = key
 
     path.write_text(json.dumps(asdict(creds), indent=2), encoding="utf-8")
@@ -94,8 +100,11 @@ def load_credentials() -> Credentials | None:
 def resolve_key(creds: Credentials) -> str:
     """Retrieve the actual API key from keyring or plaintext fallback."""
     if creds.key_ref and _try_keyring():
-        import keyring
-        return keyring.get_password(_KEYRING_SERVICE, creds.key_ref) or ""
+        try:
+            import keyring
+            return keyring.get_password(_KEYRING_SERVICE, creds.key_ref) or ""
+        except Exception:
+            pass
     return creds.key_plaintext
 
 
