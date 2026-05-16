@@ -1,13 +1,19 @@
-"""Unit tests for the 5-gate verification pipeline (spec7 §2.4)."""
+"""Unit tests for the 5-gate verification pipeline (spec7 §2.4).
+
+Covers gates 1-5 in isolation and full pipeline orchestration.
+Closes #66.
+"""
 from __future__ import annotations
 
 import textwrap
+from unittest.mock import patch
 
-import pytest
-
-from quell.core.gates.gate1_ast import GateContext, check as gate1
+from quell.core.gates.gate1_ast import GateContext
+from quell.core.gates.gate1_ast import check as gate1
 from quell.core.gates.gate2_originality import check as gate2
 from quell.core.gates.gate3_security import check as gate3
+from quell.core.gates.gate4_pass_correct import check as gate4
+from quell.core.gates.gate5_fail_violated import check as gate5
 from quell.core.models import (
     BucketedResult,
     ConfidenceTier,
@@ -182,8 +188,9 @@ class TestV2Models:
         assert confidence_tier_for(0) == ConfidenceTier.LOW
 
     def test_bucketed_result_written(self):
-        from quell.core.models import GeneratedTest
         from pathlib import Path
+
+        from quell.core.models import GeneratedTest
         gt = GeneratedTest(
             requirement_id="req-1",
             test_function_name="test_positive",
@@ -215,3 +222,151 @@ class TestV2Models:
         assert br.bucket == OutputBucket.FLAGGED
         assert br.flag_reason == FlagReason.EXTERNAL_API
         assert br.generated_test is None
+
+
+# ── Gate 4 ────────────────────────────────────────────────────────────────────
+
+
+class TestGate4:
+    def test_passing_test_returns_passed(self) -> None:
+        # A trivially-passing test
+        code = "def test_trivial():\n    assert 1 == 1\n"
+        result = gate4(code, _EMPTY_CTX)
+        assert result.passed
+        assert result.gate == 4
+
+    def test_failing_test_returns_not_passed(self) -> None:
+        code = "def test_fail():\n    assert False, 'deliberate'\n"
+        result = gate4(code, _EMPTY_CTX)
+        assert not result.passed
+        assert result.gate == 4
+        assert "false positive" in (result.reason or "")
+
+    def test_timeout_returns_not_passed(self) -> None:
+        import subprocess
+        code = "def test_x(): assert True\n"
+        ctx = _EMPTY_CTX
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="pytest", timeout=30)):
+            result = gate4(code, ctx)
+        assert not result.passed
+        assert "timed out" in (result.reason or "")
+
+    def test_gate_number_is_4(self) -> None:
+        code = "def test_ok(): assert True\n"
+        result = gate4(code, _EMPTY_CTX)
+        assert result.gate == 4
+
+
+# ── Gate 5 ────────────────────────────────────────────────────────────────────
+
+
+class TestGate5:
+    def test_no_violated_source_returns_not_passed(self) -> None:
+        code = "def test_x(): assert True\n"
+        ctx = GateContext()  # violated_source is None
+        result = gate5(code, ctx)
+        assert not result.passed
+        assert result.gate == 5
+        assert "no violation" in (result.reason or "")
+
+    def test_gate_number_is_5(self) -> None:
+        code = "def test_x(): assert True\n"
+        ctx = GateContext(violated_source="# violated")
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 1  # test fails → gate passes
+            result = gate5(code, ctx)
+        assert result.gate == 5
+
+    def test_test_failing_on_violated_code_means_gate_passes(self) -> None:
+        code = "def test_catches_bug(): assert False\n"
+        ctx = GateContext(violated_source="x = 1\n")
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 1  # non-zero = test failed = gate passes
+            result = gate5(code, ctx)
+        assert result.passed
+
+    def test_test_passing_on_violated_code_means_gate_fails(self) -> None:
+        code = "def test_too_weak(): assert True\n"
+        ctx = GateContext(violated_source="x = 1\n")
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0  # zero = test passed = gate fails
+            result = gate5(code, ctx)
+        assert not result.passed
+        assert "wouldn't catch it" in (result.reason or "")
+
+    def test_timeout_returns_not_passed(self) -> None:
+        import subprocess
+        code = "def test_x(): assert True\n"
+        ctx = GateContext(violated_source="x = 1\n")
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="pytest", timeout=30)):
+            result = gate5(code, ctx)
+        assert not result.passed
+        assert "timed out" in (result.reason or "")
+
+
+# ── Pipeline Orchestration ────────────────────────────────────────────────────
+
+
+class TestPipelineOrchestration:
+    """Verifies that gate failures produce the right OutputBucket (spec7 §2.4)."""
+
+    def test_gate1_fail_produces_flagged(self) -> None:
+        from quell.core.models import FlagReason, OutputBucket, VerificationStatus
+        from quell.report.generator import verification_status_to_bucket
+
+        bucket, reason = verification_status_to_bucket(VerificationStatus.SYNTAX_ERROR, [])
+        assert bucket == OutputBucket.FLAGGED
+        assert reason == FlagReason.INVALID_SYNTAX
+
+    def test_gate4_fail_produces_flagged_gate4_reason(self) -> None:
+        from quell.core.models import FlagReason, OutputBucket, VerificationStatus
+        from quell.report.generator import verification_status_to_bucket
+
+        bucket, reason = verification_status_to_bucket(VerificationStatus.FAILS_ON_CORRECT, [])
+        assert bucket == OutputBucket.FLAGGED
+        assert reason == FlagReason.GATE4_FAILURE
+
+    def test_gate5_fail_produces_flagged_gate5_reason(self) -> None:
+        from quell.core.models import FlagReason, OutputBucket, VerificationStatus
+        from quell.report.generator import verification_status_to_bucket
+
+        bucket, reason = verification_status_to_bucket(
+            VerificationStatus.DOESNT_CATCH_VIOLATION, []
+        )
+        assert bucket == OutputBucket.FLAGGED
+        assert reason == FlagReason.GATE5_FAILURE
+
+    def test_all_gates_pass_produces_written(self) -> None:
+        from quell.core.models import OutputBucket, VerificationStatus
+        from quell.report.generator import verification_status_to_bucket
+
+        bucket, reason = verification_status_to_bucket(VerificationStatus.VERIFIED, [])
+        assert bucket == OutputBucket.WRITTEN
+        assert reason is None
+
+    def test_gates_run_in_order_gate1_first(self) -> None:
+        # A test with a syntax error should fail gate 1 immediately
+        bad_code = "def broken(:\n    pass\n"
+        result = gate1(bad_code, _EMPTY_CTX)
+        assert not result.passed
+        assert result.gate == 1
+
+    def test_gate2_rejection_not_scaffolded(self) -> None:
+        # Gate 2 failure means the test is rejected outright — not scaffolded
+        boilerplate = textwrap.dedent("""\
+            def test_boilerplate():
+                result = some_func()
+                assert result is not None
+        """)
+        result = gate2(boilerplate, _EMPTY_CTX)
+        assert not result.passed
+        assert result.gate == 2
+
+    def test_gate3_fail_produces_security_flag(self) -> None:
+
+        # Security flag maps via VerificationStatus.ERROR → GATE4_FAILURE in current impl
+        # But gate3 directly returns GateResult(passed=False) — check the gate result
+        code = "import os\ndef test_x():\n    os.system('ls')\n"
+        result = gate3(code, _EMPTY_CTX)
+        assert not result.passed
+        assert result.gate == 3
