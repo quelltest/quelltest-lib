@@ -9,11 +9,18 @@
 
 Quelltest reads your Python docstrings, Pydantic models, and PySpark schemas — extracts every testable requirement — generates a verified pytest test for each gap — and writes it to disk only after proving it catches real violations.
 
+**v1.0.0** — infrastructure-aware verified testing: QuellGraph SQLite code-intelligence graph,
+ephemeral Docker containers, and per-test confidence scores.
+
 No LLM key required. No code leaves your machine.
 
 ```bash
 pip install quelltest
 quell check src/ --fix --no-llm
+
+# v1.0.0: build code-intelligence graph, run with auto-containers
+quell graph build src/
+quell check src/ --with-containers --fix --min-confidence 70
 ```
 
 ---
