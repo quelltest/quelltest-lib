@@ -15,6 +15,7 @@ and per-test confidence scores.
 - [Configuration](configuration.md) — `quell.toml` reference
 - [GitHub Integration](github-integration.md) — GitHub Actions + PR annotations
 - [GitHub Actions](github-actions.yml) — composite action reference
+- [Changelog](changelog.md) — full release history v0.1.0 → v1.0.0
 
 ## Key concepts
 
