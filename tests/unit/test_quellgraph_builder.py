@@ -1,6 +1,8 @@
 """Tests for QuellGraphBuilder — incremental SQLite graph builder."""
 from __future__ import annotations
 
+import json
+import sqlite3
 import textwrap
 from pathlib import Path
 
@@ -95,7 +97,6 @@ class TestInfraTagPropagation:
         self, db: QuellGraphBuilder, project: Path
     ) -> None:
         db.build(project)
-        import sqlite3
         conn = sqlite3.connect(str(db._db_path))
         conn.row_factory = sqlite3.Row
         row = conn.execute(
@@ -103,7 +104,6 @@ class TestInfraTagPropagation:
         ).fetchone()
         conn.close()
         assert row is not None
-        import json
         tags = json.loads(row["infra_tags"] or "[]")
         assert "postgres" in tags
 
@@ -111,7 +111,6 @@ class TestInfraTagPropagation:
         self, db: QuellGraphBuilder, project: Path
     ) -> None:
         db.build(project)
-        import sqlite3, json
         conn = sqlite3.connect(str(db._db_path))
         conn.row_factory = sqlite3.Row
         row = conn.execute(
@@ -123,13 +122,77 @@ class TestInfraTagPropagation:
         assert tags == []
         assert row["is_pure"] == 1
 
+    def test_bfs_three_hop_propagation(self, db: QuellGraphBuilder, tmp_path: Path) -> None:
+        """
+        BFS infra-tag propagation over a synthetic 3-hop call chain.
+
+        get_user() → db_query() → session_exec() → sqlalchemy Session param
+        sqlalchemy is only imported in the file containing session_exec.
+        get_user must inherit the postgres tag through BFS.
+        """
+        src = tmp_path / "hops"
+        src.mkdir()
+
+        # hop3.py: session_exec has Session param → direct postgres tag via import + param type
+        (src / "hop3.py").write_text(
+            textwrap.dedent("""\
+            from sqlalchemy.orm import Session
+
+            def session_exec(db: Session) -> list:
+                return db.execute("SELECT 1").fetchall()
+            """),
+            encoding="utf-8",
+        )
+
+        # hop2.py: db_query calls session_exec — no direct sqlalchemy import
+        (src / "hop2.py").write_text(
+            textwrap.dedent("""\
+            from hop3 import session_exec
+
+            def db_query():
+                return session_exec(None)
+            """),
+            encoding="utf-8",
+        )
+
+        # hop1.py: get_user calls db_query — pure by direct inspection
+        (src / "hop1.py").write_text(
+            textwrap.dedent("""\
+            from hop2 import db_query
+
+            def get_user(user_id: int) -> dict:
+                return db_query()
+            """),
+            encoding="utf-8",
+        )
+
+        db.build(src)
+
+        conn = sqlite3.connect(str(db._db_path))
+        conn.row_factory = sqlite3.Row
+
+        row_session = conn.execute(
+            "SELECT infra_tags FROM functions WHERE name='session_exec'"
+        ).fetchone()
+        row_get_user = conn.execute(
+            "SELECT infra_tags FROM functions WHERE name='get_user'"
+        ).fetchone()
+        conn.close()
+
+        assert row_session is not None
+        assert "postgres" in json.loads(row_session["infra_tags"] or "[]"), \
+            "session_exec (direct sqlalchemy import) must have postgres tag"
+
+        assert row_get_user is not None
+        assert "postgres" in json.loads(row_get_user["infra_tags"] or "[]"), \
+            "get_user must inherit postgres via 3-hop BFS: get_user→db_query→session_exec→sqlalchemy"
+
 
 class TestAnnotationCoverage:
     def test_fully_typed_function_has_high_coverage(
         self, db: QuellGraphBuilder, project: Path
     ) -> None:
         db.build(project)
-        import sqlite3
         conn = sqlite3.connect(str(db._db_path))
         conn.row_factory = sqlite3.Row
         row = conn.execute(
@@ -145,7 +208,6 @@ class TestAnnotationCoverage:
         self, db: QuellGraphBuilder, project: Path
     ) -> None:
         db.build(project)
-        import sqlite3
         conn = sqlite3.connect(str(db._db_path))
         conn.row_factory = sqlite3.Row
         row = conn.execute(
