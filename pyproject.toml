@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "quelltest"
-version = "1.0.0"
+version = "2.0.0"
 description = "Your code says what it should do. Quell proves it."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -36,6 +36,12 @@ dependencies = [
 [project.optional-dependencies]
 mcp = ["mcp>=1.0.0"]
 pyspark = ["pyspark>=3.4.0"]
+# LLM fallback via Groq (spec7 §3) — pip install quelltest[groq]
+groq = ["groq>=0.9.0"]
+# OS keyring for secure credential storage — pip install quelltest[keyring]
+keyring = ["keyring>=24.0.0"]
+# Everything for LLM-powered features — pip install quelltest[llm]
+llm = ["groq>=0.9.0", "keyring>=24.0.0"]
 dev = [
     "pytest>=8.0.0",
     "pytest-cov>=5.0.0",
