@@ -162,3 +162,69 @@ class QuellConfig(BaseModel):
     enable_pyspark: bool = False    # off by default — pyspark optional dep
     score_threshold: float = 0.0
     diff_only: bool = False
+    # v2.0.0 additions
+    prs_threshold: int = 60         # minimum PRS to pass `quell ci`
+    scaffold_dir: Path = Path("tests/scaffold")  # where SCAFFOLDED stubs go
+    use_llm: bool = False           # opt-in LLM fallback (off by default)
+
+
+# ── v2.0.0 models: 5-gate pipeline + three-bucket output ─────────────────────
+
+class FlagReason(StrEnum):
+    """Human-readable reason why a test was FLAGGED (not auto-written)."""
+    EXTERNAL_API    = "depends on external API"
+    ENV_VAR         = "depends on environment variable"
+    OBJECT_STATE    = "depends on object state"
+    LOCAL_VAR_GUARD = "local variable guard"
+    ASYNC_FUNCTION  = "async function"
+    INVALID_SYNTAX  = "generator produced invalid syntax"
+    GATE4_FAILURE   = "test failed on correct code — likely false positive"
+    GATE5_FAILURE   = "test passed even with bug injected — wouldn't catch it"
+    SECURITY        = "generated test failed security review"
+    DUPLICATE       = "duplicate of existing test"
+    WEAK_ASSERTION  = "assertion too weak"
+    TOO_SIMILAR     = "too similar to existing test"
+
+
+class GateResult(BaseModel):
+    """Result of a single gate check in the 5-gate pipeline."""
+    passed: bool
+    gate: int                      # 1–5
+    reason: str | None = None      # set when passed=False
+
+
+class ConfidenceTier(StrEnum):
+    """Confidence tier for a WRITTEN test."""
+    HIGH   = "HIGH"    # ≥85 — ship without review
+    MEDIUM = "MEDIUM"  # 60–84 — review recommended
+    LOW    = "LOW"     # <60 — review required; gets # quell: review comment
+
+
+class OutputBucket(StrEnum):
+    """Which bucket a candidate test lands in after the pipeline."""
+    WRITTEN    = "WRITTEN"     # passed all 5 gates
+    SCAFFOLDED = "SCAFFOLDED"  # passed gate 1+2; human assertion needed
+    FLAGGED    = "FLAGGED"     # cannot auto-test; reason always provided
+
+
+class BucketedResult(BaseModel):
+    """Final outcome for one edge-case candidate after the full pipeline."""
+    requirement_id: str
+    bucket: OutputBucket
+    flag_reason: FlagReason | None = None   # set when bucket == FLAGGED
+    gates_passed: int = 0                   # 0–5
+    generated_test: GeneratedTest | None = None
+    confidence_score: int | None = None     # 0–100; set when bucket == WRITTEN
+    confidence_tier: ConfidenceTier | None = None
+    scaffold_file: Path | None = None       # set when bucket == SCAFFOLDED
+    source_file: Path | None = None
+    source_line: int | None = None
+
+
+def confidence_tier_for(score: int) -> ConfidenceTier:
+    """Map a 0–100 confidence score to its tier."""
+    if score >= 85:
+        return ConfidenceTier.HIGH
+    if score >= 60:
+        return ConfidenceTier.MEDIUM
+    return ConfidenceTier.LOW

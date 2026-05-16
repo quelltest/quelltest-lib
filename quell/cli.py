@@ -146,6 +146,44 @@ def _run_coro(coro: Coroutine[Any, Any, Any]) -> Any:
     return result[0]
 
 
+@app.command("find")
+def cmd_find(
+    target: Path = typer.Argument(Path("."), help="File or directory to scan for untested edge cases"),
+    fix: bool = typer.Option(False, "--fix", help="Write tests for confident cases (WRITTEN bucket)"),
+    auto: bool = typer.Option(False, "--auto", help="Skip confirmation prompts (for CI)"),
+    use_llm: bool = typer.Option(False, "--use-llm", help="Enable LLM fallback for complex cases (requires quell auth)"),
+    project_root: Path = typer.Option(Path("."), "--root"),
+    fmt: str = typer.Option("console", "--format", "-f", help="Output format: console or github"),
+) -> None:
+    """
+    Find untested edge cases in your Python code.
+
+    Auto-detects all spec sources: docstrings, Pydantic models, PySpark schemas,
+    guard clauses. No flags needed. Rule-based — no LLM, no network, no code
+    leaves your machine.
+
+    quell find src/                  find all untested edge cases
+    quell find src/ --fix            also write tests for confident cases
+    quell find src/ --fix --auto     skip prompts (use in CI)
+    quell find src/ --fix --use-llm  enable LLM for harder cases (needs auth)
+    """
+    import sys as _sys
+    _sys.stderr.write(
+        "[quell] Running quell find (primary command from v2.0.0)\n"
+    )
+    # `find` is a superset of `scan` — delegate to the scan implementation
+    # while tagging the source as the unified find command.
+    cmd_scan(
+        target=target,
+        fix=fix,
+        suggest=False,
+        llm=use_llm,
+        no_llm=False,
+        project_root=project_root,
+        fmt=fmt,
+    )
+
+
 @app.command("scan")
 def cmd_scan(
     target: Path = typer.Argument(Path("."), help="File or directory to scan"),
@@ -157,16 +195,17 @@ def cmd_scan(
     fmt: str = typer.Option("console", "--format", "-f", help="Output format: console or github"),
 ) -> None:
     """
-    Scan production code for untested logic gaps.
-
-    Reads your if/raise patterns directly — no docstrings or types needed.
-    Works on any Python file ever written. No LLM by default — instant results.
+    [deprecated] Use `quell find` instead. Will be removed in v2.2.
 
     quell scan src/                   find all logic gaps
     quell scan src/ --fix             generate failing tests (rule-based, no network)
     quell scan src/ --fix --llm       also use LLM for complex guard types
-    quell scan src/ --fix --llm --suggest   tests + suggest code fixes
     """
+    import sys as _sys
+    _sys.stderr.write(
+        "[quell] DEPRECATED: `quell scan` has been renamed to `quell find`. "
+        "It will be removed in v2.2. Run `quell find` instead.\n"
+    )
     # Fully synchronous — no asyncio.run() at the top level.
     # LLM calls inside use _run_coro() which isolates each await in its own thread.
     from quell.core.models import VerificationStatus
@@ -564,7 +603,7 @@ def _write_scan_report(
 
 
 @app.command("check")
-def cmd_check(
+def cmd_check(  # noqa: PLR0913
     target: str = typer.Argument(".", help="File or directory to check"),
     fix: bool = typer.Option(False, "--fix", help="Generate and write verified tests"),
     no_llm: bool = typer.Option(
@@ -604,19 +643,15 @@ def cmd_check(
     ),
 ) -> None:
     """
+    [deprecated] Use `quell find` instead. Will be removed in v2.2.
+
     Check requirement coverage from type annotations and docstrings.
-
-    For production code without types/docstrings, use: quell scan
-    quell scan reads your if/raise patterns directly — no annotations needed.
-
-    New flags (spec6):
-      --with-containers     spin up ephemeral containers for infra-dependent tests
-      --min-confidence=N    only write tests scoring at or above N (default 50)
-      --ci-confidence=N     CI-enforced threshold (default 70)
-      --keep-containers     keep containers alive for next run
-      --show-why            print call path explaining each container dependency
-      --graph-rebuild       force full QuellGraph rebuild before scanning
     """
+    import sys as _sys
+    _sys.stderr.write(
+        "[quell] DEPRECATED: `quell check` has been renamed to `quell find`. "
+        "It will be removed in v2.2. Run `quell find` instead.\n"
+    )
     from quell.sdk import Quell
 
     src_list = sources.split(",") if sources else ["docstring", "type"]
