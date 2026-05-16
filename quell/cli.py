@@ -12,6 +12,8 @@ Commands:
   quell pr          Analyze requirement coverage for a GitHub PR
   quell install     Set up Quell in your project (pre-commit + GitHub Action)
   quell auth        Manage authentication (login/logout/status)
+  quell graph       QuellGraph build/inspect commands
+  quell teardown    Stop all quelltest-managed ephemeral containers
 """
 from __future__ import annotations
 
@@ -37,7 +39,9 @@ app = typer.Typer(
     rich_markup_mode="rich",
 )
 auth_app = typer.Typer(help="Manage Quell authentication")
+graph_app = typer.Typer(help="QuellGraph build and inspection commands")
 app.add_typer(auth_app, name="auth")
+app.add_typer(graph_app, name="graph")
 
 console = Console()
 
@@ -572,12 +576,46 @@ def cmd_check(
     ),
     fmt: str = typer.Option("console", "--format", "-f", help="Output format: console or json"),
     project_root: Path = typer.Option(Path("."), "--root", help="Project root"),
+    with_containers: bool = typer.Option(
+        False, "--with-containers",
+        help="Auto-detect infra deps and spin up ephemeral containers",
+    ),
+    min_confidence: int = typer.Option(
+        50, "--min-confidence",
+        help="Only write tests at or above this confidence score (0-100)",
+        min=0, max=100,
+    ),
+    ci_confidence: int = typer.Option(
+        70, "--ci-confidence",
+        help="CI enforcement threshold — tests below this are review-only",
+        min=0, max=100,
+    ),
+    keep_containers: bool = typer.Option(
+        False, "--keep-containers",
+        help="Keep containers alive after the run (reused on next quell check)",
+    ),
+    show_why: bool = typer.Option(
+        False, "--show-why",
+        help="Print the dependency path explaining why each container is started",
+    ),
+    graph_rebuild: bool = typer.Option(
+        False, "--graph-rebuild",
+        help="Force a full QuellGraph rebuild before scanning",
+    ),
 ) -> None:
     """
     Check requirement coverage from type annotations and docstrings.
 
     For production code without types/docstrings, use: quell scan
     quell scan reads your if/raise patterns directly — no annotations needed.
+
+    New flags (spec6):
+      --with-containers     spin up ephemeral containers for infra-dependent tests
+      --min-confidence=N    only write tests scoring at or above N (default 50)
+      --ci-confidence=N     CI-enforced threshold (default 70)
+      --keep-containers     keep containers alive for next run
+      --show-why            print call path explaining each container dependency
+      --graph-rebuild       force full QuellGraph rebuild before scanning
     """
     from quell.sdk import Quell
 
@@ -586,10 +624,60 @@ def cmd_check(
     if no_llm:
         config = config.model_copy(update={"llm_provider": "none"})
 
+    # QuellGraph: build or rebuild before scanning if requested
+    graph_db = project_root / ".quellgraph" / "graph.db"
+    if graph_rebuild or (with_containers and not graph_db.exists()):
+        from quell.graph.builder import QuellGraphBuilder
+        with console.status("[bold blue]Building QuellGraph...[/bold blue]"):
+            builder = QuellGraphBuilder(graph_db)
+            report = builder.build(project_root)
+            console.print(
+                f"[dim]QuellGraph: {report.total_files} files "
+                f"({report.reparsed} reparsed, "
+                f"{report.total_files - report.reparsed} cached)  "
+                f"{report.functions} functions  {report.classes} classes[/dim]"
+            )
+
+    # Container engine: spin up ephemeral containers when requested
+    container_engine = None
+    if with_containers:
+        from quell.infra.engine import ContainerEngine
+        container_engine = ContainerEngine(
+            lock_path=project_root / ".quellgraph" / "containers.lock"
+        )
+        if graph_db.exists():
+            from quell.graph.query import QuellGraph
+            try:
+                graph = QuellGraph(graph_db)
+                stats = graph.stats()
+                if stats.get("infra_dependent", 0) > 0:
+                    # Collect all infra tags across functions that need containers
+                    all_tags: set[str] = set()
+                    for fn in graph.list_functions():
+                        all_tags.update(graph.get_transitive_infra_tags(fn.id))
+
+                    if show_why and all_tags:
+                        console.print(
+                            f"[dim]Containers needed: {', '.join(sorted(all_tags))}[/dim]"
+                        )
+
+                    with console.status(
+                        f"[bold blue]Starting containers: {', '.join(sorted(all_tags))}...[/bold blue]"
+                    ):
+                        container_engine.prepare(all_tags)
+            except Exception as exc:
+                console.print(f"[yellow]QuellGraph unavailable: {exc}[/yellow]")
+
     q = Quell(project_root=project_root)
 
     with console.status("[bold blue]Scanning specifications...[/bold blue]"):
         result = q.check(target, sources=src_list, fix=fix)
+
+    # Teardown containers unless --keep-containers was passed
+    if container_engine is not None and not keep_containers:
+        torn = container_engine.teardown()
+        if torn:
+            console.print(f"[dim]Containers stopped: {', '.join(torn)}[/dim]")
 
     if fmt == "json":
         gaps = [
@@ -985,6 +1073,180 @@ def _install_github_action(project_root: Path) -> None:
     console.print("     Get key: quell.buildsbyshashank.tech")
     console.print("\n  2. git add .github/workflows/quell.yml && git commit")
     console.print("\n  Quell will comment on every PR automatically.")
+
+
+# ── Teardown command ─────────────────────────────────────────────────────────
+
+
+@app.command("teardown")
+def cmd_teardown(
+    project_root: Path = typer.Option(Path("."), "--root"),
+) -> None:
+    """Stop and remove all quelltest-managed ephemeral containers."""
+    from quell.infra.engine import ContainerEngine
+
+    engine = ContainerEngine(
+        lock_path=project_root / ".quellgraph" / "containers.lock"
+    )
+    torn = engine.teardown()
+    if torn:
+        console.print(f"[green]Stopped containers: {', '.join(torn)}[/green]")
+    else:
+        console.print("[dim]No running quelltest containers found.[/dim]")
+
+
+# ── Graph subcommands ─────────────────────────────────────────────────────────
+
+
+def _require_graph(project_root: Path):
+    """Return a QuellGraph or exit with a helpful message."""
+    from quell.graph.query import QuellGraph
+
+    db = project_root / ".quellgraph" / "graph.db"
+    if not db.exists():
+        console.print(
+            "[yellow]No QuellGraph found. Run [bold]quell graph build[/bold] first.[/yellow]"
+        )
+        raise typer.Exit(1)
+    return QuellGraph(db)
+
+
+@graph_app.command("build")
+def graph_build(
+    src: Path = typer.Argument(Path("."), help="Source directory to index"),
+    project_root: Path = typer.Option(Path("."), "--root"),
+) -> None:
+    """Build or incrementally update the QuellGraph code-intelligence index."""
+    from quell.graph.builder import QuellGraphBuilder
+
+    db = project_root / ".quellgraph" / "graph.db"
+    builder = QuellGraphBuilder(db)
+
+    with console.status(f"[bold blue]Building QuellGraph from {src}...[/bold blue]"):
+        report = builder.build(src if src != Path(".") else project_root)
+
+    console.print(
+        f"[green]QuellGraph built.[/green]  "
+        f"{report.total_files} files  "
+        f"({report.reparsed} reparsed, {report.total_files - report.reparsed} cached)  "
+        f"{report.functions} functions  {report.classes} classes  "
+        f"[dim]{report.build_time_ms}ms[/dim]"
+    )
+
+
+@graph_app.command("show")
+def graph_show(
+    file: str | None = typer.Argument(None, help="Specific .py file to show (default: all)"),
+    project_root: Path = typer.Option(Path("."), "--root"),
+) -> None:
+    """Print functions, infra tags, annotation coverage, and confidence preview."""
+    graph = _require_graph(project_root)
+
+    fns = graph.list_functions(file=file) if file else graph.list_functions()
+    if not fns:
+        console.print("[dim]No functions indexed.[/dim]")
+        return
+
+    current_file = None
+    for fn in fns:
+        if fn.file != current_file:
+            current_file = fn.file
+            console.print(f"\n[bold blue]{fn.file}[/bold blue]")
+
+        tags = graph.get_transitive_infra_tags(fn.id)
+        tag_str = f"[{', '.join(sorted(tags))}]" if tags else "[]"
+        ann_pct = int(fn.annotation_coverage * 100)
+        param_typed = round(fn.annotation_coverage * (fn.param_count + 1))
+        total_slots = fn.param_count + 1
+        conf_approx = round(fn.annotation_coverage * 25 + (10 if fn.has_docstring else 0))
+        console.print(
+            f"  [cyan]{fn.name}[/cyan]  {tag_str}  "
+            f"annotations: {param_typed}/{total_slots} ({ann_pct}%)  "
+            f"purity: {fn.purity_score:.1f}  "
+            f"[dim]conf: ~{conf_approx}[/dim]"
+        )
+
+
+@graph_app.command("why")
+def graph_why(
+    function: str = typer.Argument(..., help="Function name to explain"),
+    project_root: Path = typer.Option(Path("."), "--root"),
+) -> None:
+    """Print the call path explaining why a container dependency is needed."""
+    graph = _require_graph(project_root)
+
+    fns = [fn for fn in graph.list_functions() if fn.name == function]
+    if not fns:
+        console.print(f"[yellow]Function '{function}' not found in QuellGraph.[/yellow]")
+        raise typer.Exit(1)
+
+    fn = fns[0]
+    tags = graph.get_transitive_infra_tags(fn.id)
+    if not tags:
+        console.print(f"[green]{function}[/green] has no infra dependencies — pure function.")
+        return
+
+    console.print(f"[cyan]{function}[/cyan] needs: {', '.join(sorted(tags))}")
+    path = graph.get_infra_dependency_path(fn.id)
+    if path:
+        console.print("  " + " → ".join(path))
+    else:
+        console.print("  [dim](dependency path not traced — direct import)[/dim]")
+
+
+@graph_app.command("stale")
+def graph_stale(
+    project_root: Path = typer.Option(Path("."), "--root"),
+) -> None:
+    """Show functions whose generated tests may be stale after recent changes."""
+    import subprocess
+
+    graph = _require_graph(project_root)
+
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--name-only", "HEAD"],
+            capture_output=True, text=True, cwd=project_root,
+        )
+        changed = [f for f in result.stdout.splitlines() if f.endswith(".py")]
+    except Exception:
+        console.print("[yellow]Could not detect changed files (not a git repo?).[/yellow]")
+        changed = []
+
+    if not changed:
+        console.print("[green]No changed Python files detected.[/green]")
+        return
+
+    stale_ids = graph.find_stale_tests(changed)
+    if not stale_ids:
+        console.print("[green]No stale tests detected.[/green]")
+        return
+
+    console.print(f"[yellow]{len(stale_ids)} function(s) may have stale tests:[/yellow]")
+    for fn_id in stale_ids:
+        fn = graph.get_function_by_id(fn_id)
+        if fn:
+            console.print(f"  [cyan]{fn.name}[/cyan]  ({fn.file})")
+
+
+@graph_app.command("stats")
+def graph_stats(
+    project_root: Path = typer.Option(Path("."), "--root"),
+) -> None:
+    """Print summary stats: functions, classes, infra-dependent, pure."""
+    graph = _require_graph(project_root)
+    s = graph.stats()
+
+    table = Table(title="QuellGraph Stats")
+    table.add_column("Metric")
+    table.add_column("Count", justify="right")
+
+    table.add_row("Total functions", str(s.get("functions", 0)))
+    table.add_row("Total classes", str(s.get("classes", 0)))
+    table.add_row("Infra-dependent functions", str(s.get("infra_dependent", 0)))
+    table.add_row("Pure functions", str(s.get("pure", 0)))
+
+    console.print(table)
 
 
 # ── Auth subcommands ──────────────────────────────────────────────────────────
