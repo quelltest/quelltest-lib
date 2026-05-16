@@ -25,7 +25,12 @@ import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from quell.core.models import VerificationStatus
+from quell.core.models import (
+    BucketedResult,
+    FlagReason,
+    OutputBucket,
+    VerificationStatus,
+)
 
 
 @dataclass
@@ -139,3 +144,121 @@ def outcome_from_verification(
         unknown_types=unknown_types,
         error_snippet=snippet,
     )
+
+
+# ── v2.0.0: Three-bucket report ───────────────────────────────────────────────
+
+@dataclass
+class BucketedReport:
+    """Three-bucket output report for quell find (spec7 §2.3 + §2.6)."""
+
+    quell_version: str
+    generated_at: str
+    target_name: str
+    total_edge_cases: int
+    written_count: int
+    scaffolded_count: int
+    flagged_count: int
+    prs_score: int              # 0–100
+    prs_tier: str               # "green" | "yellow" | "red"
+    prs_tier_label: str         # "Production Ready" | "Review Needed" | "Edge Cases Uncovered"
+    avg_confidence: float       # average confidence of WRITTEN tests (0–100)
+    edge_case_coverage_pct: float  # (written + scaffolded) / total * 100
+    written: list[dict] = field(default_factory=list)    # [{req_id, file, confidence, tier}]
+    scaffolded: list[dict] = field(default_factory=list) # [{req_id, file, reason}]
+    flagged: list[dict] = field(default_factory=list)    # [{req_id, file, line, reason}]
+
+    def to_dict(self) -> dict:  # type: ignore[type-arg]
+        return asdict(self)
+
+
+def bucketed_report_from_results(
+    results: list[BucketedResult],
+    quell_version: str,
+    target_name: str,
+    prs_score: int,
+    prs_tier: str,
+    prs_tier_label: str,
+) -> BucketedReport:
+    """Build a BucketedReport from a list of BucketedResult objects."""
+    import datetime
+
+    written = [r for r in results if r.bucket == OutputBucket.WRITTEN]
+    scaffolded = [r for r in results if r.bucket == OutputBucket.SCAFFOLDED]
+    flagged = [r for r in results if r.bucket == OutputBucket.FLAGGED]
+    total = len(results)
+
+    avg_conf = (
+        sum(r.confidence_score or 0 for r in written) / len(written)
+        if written else 0.0
+    )
+    coverage_pct = (len(written) + len(scaffolded)) / total * 100 if total else 0.0
+
+    return BucketedReport(
+        quell_version=quell_version,
+        generated_at=datetime.datetime.utcnow().isoformat(),
+        target_name=target_name,
+        total_edge_cases=total,
+        written_count=len(written),
+        scaffolded_count=len(scaffolded),
+        flagged_count=len(flagged),
+        prs_score=prs_score,
+        prs_tier=prs_tier,
+        prs_tier_label=prs_tier_label,
+        avg_confidence=avg_conf,
+        edge_case_coverage_pct=coverage_pct,
+        written=[
+            {
+                "requirement_id": r.requirement_id,
+                "file": str(r.scaffold_file or r.source_file or ""),
+                "confidence": r.confidence_score,
+                "tier": r.confidence_tier.value if r.confidence_tier else None,
+                "source_line": r.source_line,
+            }
+            for r in written
+        ],
+        scaffolded=[
+            {
+                "requirement_id": r.requirement_id,
+                "scaffold_file": str(r.scaffold_file or ""),
+                "source_file": str(r.source_file or ""),
+                "source_line": r.source_line,
+            }
+            for r in scaffolded
+        ],
+        flagged=[
+            {
+                "requirement_id": r.requirement_id,
+                "source_file": str(r.source_file or ""),
+                "source_line": r.source_line,
+                "reason": r.flag_reason.value if r.flag_reason else "unknown",
+            }
+            for r in flagged
+        ],
+    )
+
+
+def write_bucketed_report(report: BucketedReport, project_root: Path) -> Path:
+    """Write bucketed report to .quell/report.json and return the path."""
+    out_dir = project_root / ".quell"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / "report.json"
+    out.write_text(json.dumps(report.to_dict(), indent=2))
+    return out
+
+
+def verification_status_to_bucket(
+    status: VerificationStatus,
+    unknown_types: list[str],
+) -> tuple[OutputBucket, FlagReason | None]:
+    """Map a VerificationStatus to an OutputBucket + optional FlagReason."""
+    if status == VerificationStatus.VERIFIED:
+        return OutputBucket.WRITTEN, None
+    if status == VerificationStatus.SYNTAX_ERROR:
+        return OutputBucket.FLAGGED, FlagReason.INVALID_SYNTAX
+    if status == VerificationStatus.FAILS_ON_CORRECT:
+        return OutputBucket.FLAGGED, FlagReason.GATE4_FAILURE
+    if status == VerificationStatus.DOESNT_CATCH_VIOLATION:
+        return OutputBucket.FLAGGED, FlagReason.GATE5_FAILURE
+    # TIMEOUT or ERROR
+    return OutputBucket.FLAGGED, FlagReason.GATE4_FAILURE

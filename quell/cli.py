@@ -582,19 +582,61 @@ def _write_scan_report(
         # The report path is available via the action's output variable.
         return
 
-    console.print(f"\n[dim]Report written to {report_path}[/dim]")
-    console.print(
-        f"  verified={summary['verified_and_written']}  "
-        f"rejected={summary['rejected_fails_on_correct']}  "
-        f"skipped_local_var={summary['skipped_local_var']}  "
-        f"skipped_no_rule={summary['skipped_no_rule']}"
+    # ── Three-bucket display (spec7 §2.3) ─────────────────────────────────────
+    scaffolded_outcomes = {
+        "skipped_no_rule", "skipped_local_var", "skipped_async", "skipped_no_gen",
+    }
+    written_outcomes = {"verified_and_written", "written"}
+
+    written_items = [it for it in items if it.get("outcome") in written_outcomes]
+    scaffolded_items = [it for it in items if it.get("outcome") in scaffolded_outcomes]
+    flagged_items = [
+        it for it in items
+        if it.get("outcome") not in (written_outcomes | scaffolded_outcomes)
+    ]
+
+    total_edge_cases = max(len(gaps) if gaps else len(items), 1)
+    default_rule_confidence = 80
+    prs_raw = int(len(written_items) * default_rule_confidence / (total_edge_cases * 100) * 100)
+    prs_score = max(0, min(100, prs_raw))
+    if prs_score >= 80:
+        prs_tier, prs_label = "green", "Production Ready"
+    elif prs_score >= 60:
+        prs_tier, prs_label = "yellow", "Review Needed"
+    else:
+        prs_tier, prs_label = "red", "Edge Cases Uncovered"
+
+    from quell.ui.console import render_bucketed_summary
+    render_bucketed_summary(
+        written=[
+            {
+                "file": it.get("file", ""),
+                "confidence": default_rule_confidence,
+                "tier": "HIGH" if default_rule_confidence >= 85 else "MEDIUM",
+                "requirement_id": f"{it.get('function', '')}@{it.get('type', '')}",
+            }
+            for it in written_items
+        ],
+        scaffolded=[
+            {"scaffold_file": it.get("file", ""), "source_file": it.get("file", "")}
+            for it in scaffolded_items
+        ],
+        flagged=[
+            {
+                "source_file": it.get("file", ""),
+                "source_line": it.get("line"),
+                "reason": it.get("reason") or it.get("outcome", "unknown"),
+            }
+            for it in flagged_items
+        ],
+        prs_score=prs_score,
+        prs_tier=prs_tier,
+        prs_tier_label=prs_label,
+        avg_confidence=float(default_rule_confidence) if written_items else 0.0,
+        total=total_edge_cases,
+        report_path=str(report_path),
     )
-    if summary["framework_routes_detected"]:
-        console.print(
-            f"  framework_routes={summary['framework_routes_detected']}  "
-            f"skipped_no_app={summary['skipped_framework_no_app']}  "
-            f"skipped_unsupported={summary['skipped_framework_unsupported']}"
-        )
+
     if summary["rejected_fails_on_correct"] > 0:
         console.print(
             "  [dim]Tip: share quell-report.json with the Quell maintainer "
