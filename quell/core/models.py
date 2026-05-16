@@ -168,7 +168,14 @@ class QuellConfig(BaseModel):
     use_llm: bool = False           # opt-in LLM fallback (off by default)
 
 
-# ── v2.0.0 models: 5-gate pipeline + three-bucket output ─────────────────────
+# ── v2.0.0 models: confidence scoring and three-bucket output ─────────────────
+
+class ConfidenceTier(StrEnum):
+    """Confidence tier for a WRITTEN test (spec7 §2.5)."""
+    HIGH   = "HIGH"    # ≥85 — ship without review
+    MEDIUM = "MEDIUM"  # 60–84 — review recommended
+    LOW    = "LOW"     # <60 — review required; gets # quell: review comment
+
 
 class FlagReason(StrEnum):
     """Human-readable reason why a test was FLAGGED (not auto-written)."""
@@ -191,13 +198,6 @@ class GateResult(BaseModel):
     passed: bool
     gate: int                      # 1–5
     reason: str | None = None      # set when passed=False
-
-
-class ConfidenceTier(StrEnum):
-    """Confidence tier for a WRITTEN test."""
-    HIGH   = "HIGH"    # ≥85 — ship without review
-    MEDIUM = "MEDIUM"  # 60–84 — review recommended
-    LOW    = "LOW"     # <60 — review required; gets # quell: review comment
 
 
 class OutputBucket(StrEnum):
