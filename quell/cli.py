@@ -1373,3 +1373,82 @@ def auth_status() -> None:
     except RuntimeError as e:
         console.print(f"[red]Session invalid: {e}[/red]")
         console.print("  Run: [bold]quell auth login[/bold]")
+
+
+@auth_app.command("set")
+def auth_set(
+    provider: str = typer.Option(..., "--provider", help="Provider: groq, quell, anthropic, openai"),
+    key: str = typer.Option("", "--key", help="API key (omit to use quell-managed auth)"),
+) -> None:
+    """Configure a LLM provider API key.
+
+    quell auth set --provider groq --key sk-...    # BYO Groq key
+    quell auth set --provider quell               # Use Quell-managed (Pro)
+    quell auth set --provider anthropic --key sk-ant-...
+    """
+    from quell.auth.storage import AuthMode, save_credentials
+
+    mode: AuthMode = "byo" if key else "quell"
+    try:
+        save_credentials(
+            provider=provider,  # type: ignore[arg-type]
+            mode=mode,
+            key=key,
+        )
+    except Exception as exc:
+        console.print(f"[red]Failed to save credentials: {exc}[/red]")
+        raise typer.Exit(1)
+
+    if key:
+        console.print(f"[green]BYO key saved for provider '{provider}'.[/green]")
+        console.print("  Your code never leaves your machine in rule-based mode.")
+        console.print("  LLM fallback sends only function signature + docstring.")
+    else:
+        console.print(f"[green]Configured to use Quell-managed '{provider}' (Pro).[/green]")
+        console.print("  Run [bold]quell auth login[/bold] to authenticate.")
+
+
+@auth_app.command("status")
+def auth_status_v2(
+    privacy: bool = typer.Option(False, "--privacy", help="Show what data is sent per mode"),
+) -> None:
+    """Show current Quell auth status and configured provider.
+
+    quell auth status            # show provider, tier, key validity
+    quell auth status --privacy  # print exactly what leaves your machine
+    """
+    from quell.auth.storage import load_credentials, resolve_key
+
+    if privacy:
+        console.print("[bold]Privacy statement — what leaves your machine:[/bold]\n")
+        console.print(
+            "  [green]Rule-based mode (no auth):[/green]\n"
+            "    Zero network calls. Code never leaves your machine.\n"
+            "    All analysis is local AST scanning.\n"
+        )
+        console.print(
+            "  [yellow]BYO key (groq/anthropic/openai):[/yellow]\n"
+            "    Sent to provider: function signature + docstring + spec text only.\n"
+            "    Never sent: full source files, test code, secrets, env vars.\n"
+        )
+        console.print(
+            "  [blue]Quell-managed (Pro):[/blue]\n"
+            "    Same as BYO key, routed through quell.buildsbyshashank.tech proxy.\n"
+            "    Quell does not log your code.\n"
+        )
+        return
+
+    creds = load_credentials()
+    if not creds or creds.provider == "none":
+        console.print("[yellow]No auth configured.[/yellow]")
+        console.print("  Rule-based checks work without auth (free tier).")
+        console.print("  To add a key: [bold]quell auth set --provider groq --key sk-...[/bold]")
+        return
+
+    key = resolve_key(creds)
+    key_status = "[green]valid[/green]" if key else "[yellow]not found[/yellow]"
+
+    console.print(f"  Provider : [bold]{creds.provider}[/bold]")
+    console.print(f"  Mode     : {creds.mode}")
+    console.print(f"  Tier     : {creds.tier}")
+    console.print(f"  Key      : {key_status}")
