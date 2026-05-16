@@ -124,3 +124,65 @@ def format_pr_comment(
     ]
 
     return "\n".join(lines)
+
+
+# ── v2.0.0: PRS-based PR comment (spec7 §2.6, §5.5) ─────────────────────────
+
+QUELL_SITE = "https://quell.buildsbyshashank.tech"
+
+
+def format_prs_comment(
+    prs_score: int,
+    prs_tier: str,
+    prs_tier_label: str,
+    written_count: int,
+    scaffolded_count: int,
+    flagged_count: int,
+    total_edge_cases: int,
+    avg_confidence: float,
+    before_score: int | None = None,
+) -> str:
+    """Build a PR comment showing PRS + three-bucket summary (spec7 §2.3, §2.6).
+
+    Returns GitHub-flavoured markdown. Idempotent via COMMENT_MARKER.
+    """
+    tier_emoji = {"green": "🟢", "yellow": "🟡", "red": "🔴"}.get(prs_tier, "⚪")
+    coverage_pct = (
+        int((written_count + scaffolded_count) / total_edge_cases * 100)
+        if total_edge_cases else 0
+    )
+
+    delta_str = ""
+    if before_score is not None:
+        delta = prs_score - before_score
+        sign = "+" if delta >= 0 else ""
+        delta_str = f"  ▲ {sign}{delta} (was {before_score} before run)"
+
+    lines: list[str] = [
+        COMMENT_MARKER,
+        "",
+        f"## {tier_emoji} Quell PRS: {prs_score}/100 — {prs_tier_label}{delta_str}",
+        "",
+        "| Bucket | Count | Detail |",
+        "|--------|------:|--------|",
+        f"| ✓ WRITTEN | {written_count} | Tests passed all 5 gates, ready to ship |",
+        f"| ⚠ SCAFFOLDED | {scaffolded_count} | Structure written, assertion needed |",
+        f"| 🚩 FLAGGED | {flagged_count} | Cannot auto-test — reason provided |",
+        "",
+        f"**Edge Case Coverage:** {coverage_pct}%"
+        f" ({written_count + scaffolded_count} of {total_edge_cases} handled)",
+    ]
+
+    if written_count and avg_confidence:
+        lines.append(
+            f"**Avg Test Confidence:** {avg_confidence:.0f}%"
+            f" (across {written_count} WRITTEN tests)"
+        )
+
+    lines += [
+        "",
+        "---",
+        f"*[Quell]({QUELL_SITE}) — edge case finder. "
+        f"[Docs]({QUELL_SITE}/docs)*",
+    ]
+    return "\n".join(lines)

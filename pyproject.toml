@@ -67,6 +67,8 @@ select = ["E", "F", "I", "N", "W", "UP"]
 "quell/tests/*.py" = ["E501", "F401", "F811", "I001", "I002"]
 # SVG template strings are intentionally long
 "quell/core/confidence/badge.py" = ["E501"]
+# YAML template strings and shell commands are intentionally long
+"quell/cli.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.11"
