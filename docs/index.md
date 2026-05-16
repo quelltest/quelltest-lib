@@ -1,21 +1,22 @@
-# Quelltest Documentation
+# Quell Documentation
 
-> *Your specs say what your code should do. Quelltest proves it.*
+> *Your code says what it should do. Quell proves it.*
 
-Quelltest reads specifications that already exist in your codebase — docstrings, Pydantic models,
-PySpark schemas — extracts every testable requirement, generates a verified pytest test for each
-gap, and writes it to disk only after proving it catches real violations.
+Quell finds untested edge cases in Python code and writes proven pytest tests for them.
+The engine is rule-based and deterministic — ~75% of cases handled with no LLM, no network,
+no code leaving your machine.
 
-**v1.0.0** introduces infrastructure-aware verified testing: QuellGraph, ephemeral containers,
-and per-test confidence scores.
+**v2.0.0** introduces `quell find`, three-bucket output (WRITTEN / SCAFFOLDED / FLAGGED),
+the 5-gate verification pipeline, and the Production Readiness Score (PRS).
 
 ## Guides
 
 - [Quick Start](quickstart.md) — install, first run, CI setup
-- [Configuration](configuration.md) — `quell.toml` reference
+- [How It Works](how-it-works.md) — 5-gate pipeline, confidence scoring, PRS deep-dive
+- [CLI Reference](cli.md) — all commands and flags
+- [Configuration](configuration.md) — `[tool.quell]` reference
 - [GitHub Integration](github-integration.md) — GitHub Actions + PR annotations
-- [GitHub Actions](github-actions.yml) — composite action reference
-- [Changelog](changelog.md) — full release history v0.1.0 → v1.0.0
+- [Changelog](changelog.md) — full release history
 
 ## Key concepts
 

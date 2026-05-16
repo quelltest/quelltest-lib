@@ -3,7 +3,6 @@
 ## Prerequisites
 
 - Python 3.11+
-- Docker Desktop (optional — only needed for `--with-containers`)
 
 ## Installation
 
@@ -11,88 +10,91 @@
 pip install quelltest
 ```
 
-## Step 1: Run quell check
+## Step 1: Find untested edge cases
 
-Point `quell check` at your source directory. It reads docstrings, Pydantic models,
-and PySpark schemas, generates verified pytest tests, and writes only those that pass
-two-phase verification.
+Point `quell find` at your source directory. It reads guard clauses, docstrings, and Pydantic models, then shows which edge cases have no test.
 
 ```bash
-quell check src/
+quell find src/
 ```
 
-Add `--fix` to write verified tests to disk automatically:
+Example output:
+
+```
+Quell Scan — reading guard clauses in 12 file(s)
+
+✓ WRITTEN  (8)    Tests generated, passed 5/5 gates, ready to ship.
+                  → tests/test_payments.py        confidence: 94%  [HIGH]
+                  → tests/test_auth.py            confidence: 88%  [HIGH]
+                  → tests/test_billing_caps.py    confidence: 72%  [MEDIUM]
+
+⚠ SCAFFOLDED (9)  Test structure written. You finish the assertion.
+                  → tests/scaffold/test_billing.py
+                  → tests/scaffold/test_user.py
+
+✗ FLAGGED  (6)    Cannot auto-test. Here's why.
+                  → src/billing.py:142  depends on external API
+                  → src/user.py:87     no violation injectable
+
+─────────────────────────────────────────────────────
+PRS  72/100  🟡 Review Needed
+Edge case coverage: 73%  |  Avg confidence: 85%
+```
+
+## Step 2: Write the tests
+
+Add `--fix` to write WRITTEN tests to disk:
 
 ```bash
-quell check src/ --fix
+quell find src/ --fix
 ```
 
-## Step 2: Build the code-intelligence graph (v1.0.0)
-
-QuellGraph scans your project AST and tracks transitive infrastructure dependencies.
-Run once; subsequent builds are incremental (only changed files re-parsed).
+Add `--auto` to skip the confirmation prompt (use in CI):
 
 ```bash
-quell graph build src/
-quell graph show              # list functions and their infra tags
-quell graph why process_payment   # explain infra dependency chain
+quell find src/ --fix --auto
 ```
 
-## Step 3: Run with infrastructure containers (v1.0.0)
+## Step 3: Set up CI with a PRS badge
 
-If your functions depend on postgres, redis, or other infrastructure, pass
-`--with-containers` to auto-start throwaway Docker containers:
+Install the GitHub Action:
 
 ```bash
-quell check src/ --with-containers --fix
+quell install --action
 ```
 
-Quelltest uses only hardcoded ephemeral credentials — your real `DATABASE_URL`
-is never read. Containers are torn down automatically after the run.
+This writes `.github/workflows/quelltest.yml`. On every PR it runs `quell find --format github`, posts inline annotations on untested lines, and comments a PRS summary.
 
-To stop containers manually:
-
-```bash
-quell teardown
-```
-
-## Step 4: Filter by confidence score (v1.0.0)
-
-Each generated test receives a 0–100 confidence score. Use `--min-confidence`
-to control which tests are written:
-
-```bash
-quell check src/ --fix --min-confidence 70   # write only MEDIUM+ tests
-quell check src/ --fix --min-confidence 85   # write only HIGH tests
-```
-
-## Step 5: Set up CI
-
-```bash
-quell install --pr   # writes .github/workflows/quelltest.yml
-```
-
-Or use the composite action directly in your workflow:
+Or add the action directly to your workflow:
 
 ```yaml
-- uses: shashank7109/quelltest_lib@v1.0.0
+- name: Quell edge case scan
+  uses: quelltest/quelltest-lib@v2.0.0
   with:
     source-dir: src/
-    fail-on-gaps: 'true'
-    min-confidence: '70'
+```
+
+## Step 4: Optional — LLM fallback for harder cases
+
+~75% of edge cases are handled with no network calls. For the rest, enable LLM fallback via Groq (fast, cheap):
+
+```bash
+quell auth set --provider groq --key sk-...
+quell find src/ --fix --use-llm
 ```
 
 ## Configuration
 
-Add `[tool.quelltest]` to your `pyproject.toml`:
+Run `quell init` to add the default config block, or add it manually:
 
 ```toml
-[tool.quelltest]
-llm_provider = "anthropic"        # or "ollama" for local
-llm_model = "claude-sonnet-4-5"
+[tool.quell]
+llm_provider = "groq"
+llm_model = "llama-3.3-70b-versatile"
+prs_threshold = 60        # minimum PRS to pass quell ci
+scaffold_dir = "tests/scaffold"
+use_llm = false           # opt-in LLM fallback
 auto_write = false
-score_threshold = 0.0
-ci_confidence = 70                # minimum confidence to run in CI
 ```
 
-Or create `quell.toml` in your project root with the same keys.
+See [configuration reference](configuration.md) for all options.
