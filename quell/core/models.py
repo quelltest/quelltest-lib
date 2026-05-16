@@ -72,6 +72,11 @@ class GeneratedTest(BaseModel):
     explanation: str
     generated_by: str  # "rule_engine" | "llm:model-name"
     unknown_types: list[str] = Field(default_factory=list)  # types rule engine couldn't stub
+    confidence_score: int | None = None  # 0-100; None means not yet scored
+
+    def meets_confidence(self, threshold: int = 50) -> bool:
+        """Return True if the confidence score meets or exceeds the threshold."""
+        return self.confidence_score is None or self.confidence_score >= threshold
 
 
 class VerificationStatus(StrEnum):

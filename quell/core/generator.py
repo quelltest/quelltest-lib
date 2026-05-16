@@ -6,6 +6,12 @@ Strategy:
    These are deterministic and fast. No LLM needed.
 2. For UNKNOWN or complex operators: use LLM with rich context.
 3. Always return a GeneratedTest with test_code as a valid Python function string.
+
+Confidence gate:
+  After scoring, call quell.scoring.confidence.filter_by_confidence() to drop
+  tests below the threshold before verification and writing. Default thresholds:
+    write  threshold: 50  (override: --min-confidence=N)
+    CI     threshold: 70  (override: quell.toml ci_confidence)
 """
 from __future__ import annotations
 
