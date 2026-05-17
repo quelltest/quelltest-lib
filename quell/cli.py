@@ -945,49 +945,136 @@ def cmd_prove(
 
 @app.command("score")
 def cmd_score(
-    badge: bool = typer.Option(False, "--badge", help="Write badge.svg to .quell/"),
+    target: Path = typer.Argument(Path("."), help="File or directory to score"),
+    badge: bool = typer.Option(False, "--badge", help="Print SVG badge to stdout"),
+    json_out: bool = typer.Option(False, "--json", help="Output score as JSON"),
     project_root: Path = typer.Option(Path("."), "--root"),
 ) -> None:
-    """Show project-wide Quell Score."""
-    from quell.score.badge import write_badge
-    from quell.sdk import Quell
+    """Show Production Readiness Score (PRS) for a path.
 
-    q = Quell(project_root=project_root)
+    Reads cached .quell/quell-report.json when available.
+    Falls back to a live scan if no cached report exists.
 
-    with console.status("[bold blue]Calculating score...[/bold blue]"):
-        project_score = q.score()
+    quell score src/              # show PRS for src/
+    quell score src/ --badge      # print SVG badge to stdout
+    quell score src/ --json       # JSON output for scripts
+    """
+    import json as _json
 
-    if not project_score.files:
-        console.print("[yellow]No requirements found. Add docstrings or Pydantic models.[/yellow]")
+    from quell.core.confidence.badge import generate_badge
+    from quell.core.confidence.prs import PRSResult, compute_prs
+
+    # Try reading cached report first
+    report_path = project_root / "quell-report.json"
+    prs: PRSResult | None = None
+
+    if report_path.exists():
+        try:
+            data = _json.loads(report_path.read_text(encoding="utf-8"))
+            # Bucketed report format has written_count / flagged_count
+            if "written_count" in data and "flagged_count" in data:
+                from quell.core.models import BucketedResult, ConfidenceTier, FlagReason, OutputBucket
+                results: list[BucketedResult] = []
+                for item in data.get("written", []):
+                    conf = item.get("confidence") or 80
+                    tier_str = (item.get("tier") or "MEDIUM").upper()
+                    tier = ConfidenceTier(tier_str) if tier_str in ("HIGH", "MEDIUM", "LOW") else ConfidenceTier.MEDIUM
+                    results.append(BucketedResult(
+                        requirement_id=item.get("requirement_id", ""),
+                        bucket=OutputBucket.WRITTEN,
+                        gates_passed=5,
+                        confidence_score=conf,
+                        confidence_tier=tier,
+                    ))
+                for item in data.get("scaffolded", []):
+                    results.append(BucketedResult(
+                        requirement_id=item.get("requirement_id", ""),
+                        bucket=OutputBucket.SCAFFOLDED,
+                        gates_passed=3,
+                    ))
+                for item in data.get("flagged", []):
+                    raw_reason = item.get("reason", "unknown")
+                    flag_reason: FlagReason | None = None
+                    for fr in FlagReason:
+                        if fr.value == raw_reason:
+                            flag_reason = fr
+                            break
+                    results.append(BucketedResult(
+                        requirement_id=item.get("requirement_id", ""),
+                        bucket=OutputBucket.FLAGGED,
+                        flag_reason=flag_reason,
+                        gates_passed=0,
+                    ))
+                prs = compute_prs(results)
+        except Exception:
+            prs = None
+
+    if prs is None:
+        # Fall back to live scan (no --fix, just reading)
+        console.print("[dim]No cached report found — running a quick scan...[/dim]")
+        from quell.core.confidence.prs import compute_prs as _compute_prs
+        from quell.core.models import BucketedResult, OutputBucket
+        from quell.coverage.checker import CoverageChecker
+        from quell.spec.code_guard_reader import CodeGuardReader
+        from quell.synthesis.rule_engine import RuleEngine
+
+        files = (
+            [f for f in target.rglob("*.py")
+             if "test" not in f.name and ".venv" not in str(f) and "__pycache__" not in str(f)]
+            if target.is_dir() else [target]
+        )
+        reader = CodeGuardReader()
+        checker = CoverageChecker(project_root)
+        engine = RuleEngine()
+        all_reqs = []
+        for f in files:
+            all_reqs.extend(reader.read(f))
+        checked = checker.check(all_reqs)
+        gaps = [r for r in checked if not r.is_covered]
+
+        scan_results: list[BucketedResult] = []
+        for req in gaps:
+            test = engine.generate(req)
+            if test is not None:
+                scan_results.append(BucketedResult(
+                    requirement_id=req.id,
+                    bucket=OutputBucket.WRITTEN,
+                    gates_passed=5,
+                    confidence_score=80,
+                ))
+            else:
+                scan_results.append(BucketedResult(
+                    requirement_id=req.id,
+                    bucket=OutputBucket.SCAFFOLDED,
+                    gates_passed=3,
+                ))
+        prs = _compute_prs(scan_results)
+
+    if json_out:
+        import json as _json2
+        from dataclasses import asdict
+        print(_json2.dumps(asdict(prs), indent=2))
         return
 
-    table = Table(title="Quell Score by File")
-    table.add_column("File", style="cyan")
-    table.add_column("Requirements")
-    table.add_column("Covered")
-    table.add_column("Score")
-    table.add_column("Grade")
-
-    for fs in project_score.files:
-        color = (
-            "green" if fs.quell_score >= 0.80
-            else "yellow" if fs.quell_score >= 0.60
-            else "red"
-        )
-        table.add_row(
-            str(fs.file_path.name),
-            str(fs.total_requirements),
-            str(fs.covered_requirements),
-            f"[{color}]{fs.percentage}%[/{color}]",
-            f"[{color}]{fs.grade}[/{color}]",
-        )
-
-    console.print(table)
-    console.print(f"\n[bold]Project Score:[/bold] {project_score.percentage}%")
-
     if badge:
-        path = write_badge(project_score.total_score, project_root / ".quell")
-        console.print(f"[green]Badge written to {path}[/green]")
+        svg = generate_badge(prs.score, prs.tier)
+        print(svg)
+        return
+
+    tier_color = {"green": "green", "yellow": "yellow", "red": "red"}.get(prs.tier, "white")
+    tier_emoji = {"green": "🟢", "yellow": "🟡", "red": "🔴"}.get(prs.tier, "")
+
+    console.print(Panel.fit(
+        f"[bold]PRS  [{tier_color}]{prs.score}/100[/{tier_color}][/bold]  "
+        f"{tier_emoji} [{tier_color}]{prs.tier_label}[/{tier_color}]\n\n"
+        f"  Edge case coverage : {prs.edge_case_coverage_pct:.0f}%\n"
+        f"  WRITTEN            : {prs.written_count}\n"
+        f"  SCAFFOLDED         : {prs.scaffolded_count}\n"
+        f"  FLAGGED            : {prs.flagged_count}\n"
+        f"  Avg confidence     : {prs.avg_written_confidence:.0f}%"
+        + (f"\n\n  [dim]Modifiers: {', '.join(prs.modifiers)}[/dim]" if prs.modifiers else ""),
+        title="quell score",
+    ))
 
 
 @app.command("ci")
@@ -1031,19 +1118,23 @@ def cmd_init(
 
     quell_block = """
 [tool.quell]
-llm_provider = "anthropic"
-llm_model = "claude-sonnet-4-5"
+llm_provider = "groq"
+llm_model = "llama-3.3-70b-versatile"
+use_llm = false
 max_verification_attempts = 3
 verification_timeout_seconds = 30
 auto_write = false
+prs_threshold = 60
+scaffold_dir = "tests/scaffold"
 enable_docstring = true
 enable_types = true
 enable_mutations = false
 enable_pyspark = false
-score_threshold = 0.0
 """
     pyproject.write_text(content + quell_block)
     console.print("[green]Added [tool.quell] to pyproject.toml[/green]")
+    console.print("  LLM fallback is off by default (use_llm = false).")
+    console.print("  To enable: [bold]quell auth set --provider groq --key sk-...[/bold]")
 
 
 @app.command("pr")
@@ -1428,42 +1519,6 @@ def auth_logout() -> None:
 
     console.print("[green]Logged out. Token revoked on server.[/green]")
     console.print("  Run [bold]quell auth login[/bold] to log in again.")
-
-
-@auth_app.command("status")
-def auth_status() -> None:
-    """Show current authentication status."""
-    import os
-
-    from quell.auth.oauth import get_valid_token, verify_token
-
-    if os.environ.get("QUELL_API_KEY"):
-        console.print("[green]Authenticated via QUELL_API_KEY env var[/green]")
-        console.print("  (CI/CD mode — no session tracking)")
-        return
-
-    token = get_valid_token()
-    if not token:
-        console.print("[yellow]Not logged in.[/yellow]")
-        console.print("  Rule-based checks work without login.")
-        console.print("  To enable LLM features: [bold]quell auth login[/bold]")
-        return
-
-    try:
-        with console.status("Checking session..."):
-            user_info = verify_token(token)
-
-        console.print(f"[green]Logged in as {user_info.get('email', 'unknown')}[/green]")
-        console.print(f"  Plan: {user_info.get('plan', 'free').capitalize()}")
-        console.print(
-            f"  LLM checks: {user_info.get('checks_remaining', '?')}"
-            f"/{user_info.get('checks_limit', '?')} remaining this month"
-        )
-        console.print("  Session: active on this device")
-
-    except RuntimeError as e:
-        console.print(f"[red]Session invalid: {e}[/red]")
-        console.print("  Run: [bold]quell auth login[/bold]")
 
 
 @auth_app.command("set")
