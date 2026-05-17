@@ -4,6 +4,54 @@ Full release history. All dates UTC. Source on [GitHub](https://github.com/quell
 
 ---
 
+## v2.0.0 — 2026-05-17 · Three-Bucket Output + Production Readiness Score
+
+**`quell find` — new primary command**
+- Replaces `quell check` as the recommended entry point
+- Auto-detects all spec sources: docstrings, Pydantic models, PySpark schemas, guard clauses
+- `--fix` writes WRITTEN tests; `--auto` skips confirmation (CI); `--format github` for annotations
+- `--use-llm` enables Groq fallback for harder cases
+
+**Three-bucket output**
+- WRITTEN — tests that passed all 5 gates, written to disk
+- SCAFFOLDED — stubs written to `tests/scaffold/test_<module>.py` with `# quell: complete assertion`; auto-gitignored by `quell init`
+- FLAGGED — edge cases with a one-line reason why they cannot be auto-tested
+
+**5-gate pipeline** (formalized from the v1 verifier)
+- Gate 1: AST validity + import check
+- Gate 2: Originality (AST fingerprint + n-gram, no copy-paste)
+- Gate 3: Security (no forbidden operations in generated test)
+- Gate 4: Passes on correct code
+- Gate 5: Fails on violated code
+
+**Production Readiness Score (PRS)**
+- 0–100 score across WRITTEN tests and their confidence values
+- +5 modifier if all FLAGGED items carry `# quell: flagged`
+- -10 modifier if any HIGH-confidence test is disabled with `@pytest.mark.skip`
+- Tiers: GREEN ≥80 / YELLOW ≥60 / RED <60
+- Posted as a PR comment by the GitHub Action; shown by `quell score`
+
+**`quell score` rewrite**
+- Reads PRS from `quell-report.json`; falls back to live scan
+- `--badge` prints an SVG badge; `--json` for machine-readable output
+- Shows WRITTEN/SCAFFOLDED/FLAGGED counts + average confidence
+
+**`quell init` v2.0.0 defaults**
+- Default LLM provider changed from `anthropic` to `groq` (`llama-3.3-70b-versatile`)
+- New keys: `prs_threshold = 60`, `scaffold_dir = "tests/scaffold"`, `use_llm = false`
+- Auto-adds scaffold dir to `.gitignore` on init
+
+**Groq LLM provider**
+- `quell auth set --provider groq --key sk-...` stores credentials in OS keyring
+- Groq is the new default: faster and has a free tier
+- `quell auth status --privacy` shows what gets sent per auth mode
+
+**GitHub Action update**
+- `quell install --action` writes updated workflow that posts a PRS comment on every PR
+- PRS tier emoji (🟢/🟡/🔴) shown inline in the comment
+
+---
+
 ## v1.0.0 — 2026-05-16 · Infrastructure-Aware Verified Testing
 
 **QuellGraph** — persistent SQLite code-intelligence graph at `.quellgraph/graph.db`

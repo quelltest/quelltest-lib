@@ -1,17 +1,26 @@
-# Quelltest
+# Quell
 
-> Verified test generation for Python. Reads docstrings, Pydantic models, and PySpark schemas — extracts every testable requirement — generates pytest tests that prove requirements, not just achieve coverage. Formerly known as Quell.
+> Untested edge cases will bite you in production. Quell finds them before they do.
 
-Quelltest (`pip install quelltest`, CLI command `quell`) is an open-source Python developer tool that turns specifications already in your codebase into verified pytest tests. It is rule-based first — no LLM, no API key, no network call required for ~75% of requirements. The remaining 25% use an LLM fallback only if you configure one.
+Quell (`pip install quelltest`, CLI command `quell`) is an open-source Python developer tool that scans your docstrings, Pydantic models, and PySpark schemas, extracts every testable edge case, and sorts them into three buckets: WRITTEN (verified tests written to disk), SCAFFOLDED (stubs written for human completion), and FLAGGED (edge cases that need explanation). Every test Quell writes passes 5 gates before touching your files.
 
-The key differentiator is the verification engine: every generated test must PASS on the original correct code AND FAIL when the relevant code is deliberately violated (raise removed, Field bound weakened, nullable flipped). Only proven tests are written to disk.
+The key differentiator is the 5-gate verification pipeline: every generated test must pass an AST validity check, an originality check, a security check, PASS on the original correct code, AND FAIL when the relevant code is deliberately violated. Only tests that clear all 5 gates are written.
+
+## Primary command
+
+```
+quell find src/
+```
+
+Scans for untested edge cases and shows three-bucket output. Add `--fix` to write WRITTEN tests. Add `--format github` for CI annotations.
 
 ## Docs
 
-- [Introduction](https://quell.buildsbyshashank.tech/docs): What Quelltest is
-- [Quickstart](https://quell.buildsbyshashank.tech/docs/quickstart): Install and run in 2 minutes
-- [How It Works](https://quell.buildsbyshashank.tech/docs/how-it-works): Pipeline and verification engine
-- [CLI Reference](https://quell.buildsbyshashank.tech/docs/cli/check): All commands
+- [Introduction](https://quell.buildsbyshashank.tech/docs): What Quell is
+- [Quickstart](https://quell.buildsbyshashank.tech/docs/quickstart): Scan your first project in 2 minutes
+- [How It Works](https://quell.buildsbyshashank.tech/docs/how-it-works): 5-gate pipeline and PRS
+- [CLI Reference](https://quell.buildsbyshashank.tech/docs/cli): All commands
+- [Configuration](https://quell.buildsbyshashank.tech/docs/configuration/pyproject): pyproject.toml options
 - [CI/CD Guide](https://quell.buildsbyshashank.tech/docs/guides/ci-cd): GitHub Actions integration
 - [SDK Reference](https://quell.buildsbyshashank.tech/docs/sdk/overview): Python API
 - [Constraint Kinds](https://quell.buildsbyshashank.tech/docs/reference/constraint-kinds): MUST_RAISE, BOUNDARY, ENUM_VALID, NOT_NULL, TYPE_CHECK, MUST_RETURN
@@ -25,21 +34,75 @@ pip install quelltest
 ## Quick example
 
 ```
-quell check src/ --fix --no-llm
+quell find src/
+quell find src/ --fix
+quell find src/ --fix --auto    # CI — skip prompts
 ```
+
+## Three-bucket output
+
+```
+✓ WRITTEN  (8)    Tests written to disk. Passed all 5 gates.
+⚠ SCAFFOLDED (9)  Stubs written to tests/scaffold/. Finish the assertion.
+✗ FLAGGED  (6)    Cannot auto-test. Reason shown per item.
+
+PRS  72/100  🟡 Review Needed
+Edge case coverage: 73%  |  Avg confidence: 85%
+```
+
+## Production Readiness Score (PRS)
+
+A 0–100 score computed from WRITTEN tests and their confidence scores:
+- +5 if all FLAGGED items are documented with `# quell: flagged`
+- -10 if any HIGH-confidence test is disabled with `@pytest.mark.skip`
+
+Tiers: GREEN ≥80 / YELLOW ≥60 / RED <60
+
+## All commands
+
+| Command | What it does |
+|---------|-------------|
+| `quell find src/` | Scan for untested edge cases, show three-bucket output |
+| `quell find src/ --fix` | Also write WRITTEN tests to disk |
+| `quell find src/ --fix --auto` | Same, skip confirmation (CI mode) |
+| `quell find src/ --format github` | GitHub Actions annotation format |
+| `quell score` | Show PRS score from last scan |
+| `quell score --badge` | Print SVG badge to stdout |
+| `quell reproduce "<bug>"` | Convert bug description into a verified failing test |
+| `quell ci` | Exit 1 if PRS is below threshold |
+| `quell init` | Add [tool.quell] to pyproject.toml |
+| `quell install --action` | Write GitHub Actions workflow |
+| `quell auth set --provider groq --key sk-...` | Configure LLM provider |
+| `quell auth status` | Show current auth config |
+
+## 5-gate pipeline
+
+Each candidate test passes 5 gates before being written:
+
+| Gate | Check |
+|------|-------|
+| Gate 1 | AST valid, imports resolve |
+| Gate 2 | Originality — not a copy of an existing test |
+| Gate 3 | Security — no forbidden operations |
+| Gate 4 | Passes on correct code (proves the test is right) |
+| Gate 5 | Fails on violated code (proves the test catches bugs) |
+
+Only Gate 4+5 survivors become WRITTEN tests. Earlier failures become SCAFFOLDED stubs.
 
 ## Key facts
 
 - Package: quelltest (PyPI)
 - CLI command: quell
-- GitHub: https://github.com/shashank7109/quelltest_lib
+- Version: 2.0.0
+- GitHub: https://github.com/quelltest/quelltest-lib
 - Website: https://quell.buildsbyshashank.tech
 - License: MIT
 - Author: Shashank Bindal
-- Version: 0.6.9
-- Formerly known as: Quell
 - Python: 3.11+
 - Spec sources: Python docstrings, Pydantic v2 Field constraints, PySpark StructType
 - Constraint kinds: MUST_RAISE, MUST_RETURN, BOUNDARY, ENUM_VALID, NOT_NULL, TYPE_CHECK
 - LLM required: No (rule engine handles ~75%)
-- LLM providers: Anthropic Claude, OpenAI GPT-4, Ollama
+- Default LLM provider: Groq (llama-3.3-70b-versatile) — fast, free tier available
+- Other LLM providers: Anthropic Claude, OpenAI GPT-4, Ollama
+- Scaffold dir: tests/scaffold/ (auto-gitignored by quell init)
+- Report file: quell-report.json (project root)

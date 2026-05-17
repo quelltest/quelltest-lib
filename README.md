@@ -6,6 +6,7 @@
 [![Python](https://img.shields.io/pypi/pyversions/quelltest)](https://pypi.org/project/quelltest/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-quell.buildsbyshashank.tech-blue)](https://quell.buildsbyshashank.tech/docs)
+[![Version](https://img.shields.io/badge/version-v2.0.0-brightgreen)](https://github.com/quelltest/quelltest-lib/releases/tag/v2.0.0)
 
 ---
 
