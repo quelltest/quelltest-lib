@@ -5,7 +5,7 @@
 [![PyPI](https://img.shields.io/pypi/v/quelltest)](https://pypi.org/project/quelltest/)
 [![Python](https://img.shields.io/pypi/pyversions/quelltest)](https://pypi.org/project/quelltest/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Docs](https://img.shields.io/badge/docs-quell.buildsbyshashank.tech-blue)](https://quell.buildsbyshashank.tech/docs)
+[![Docs](https://img.shields.io/badge/docs-quelltest.com-blue)](https://quelltest.com/docs)
 [![Version](https://img.shields.io/badge/version-v2.0.0-brightgreen)](https://github.com/quelltest/quelltest-lib/releases/tag/v2.0.0)
 
 ---
@@ -144,15 +144,15 @@ quell score src/ --badge   # prints SVG badge for README
 | Security check on generated tests | ✓ | ✗ | ✗ | ✗ |
 | Per-test confidence score | ✓ | ✗ | ✗ | ✗ |
 | Production Readiness Score | ✓ | ✗ | ✗ | ✗ |
-| Works offline (no LLM required) | ✓ | ✗ | ✗ | ✓ |
-| Your code never leaves your machine | ✓ | ✗ | ✗ | ✓ |
+| Works offline — rule engine, no API key | ✓ | ✗ | ✗ | ✓ |
+| Source code stays on disk — nothing transmitted | ✓ | ✗ | ✗ | ✓ |
 
 ---
 
 <details>
 <summary>30-second pitch</summary>
 
-Every codebase has edge cases nobody tested. Maybe it's a guard clause, maybe a Pydantic constraint, maybe a docstring that says "raises ValueError" but no test enforces it. Quell scans your code, finds those gaps, writes pytest tests for the ones it can prove, and flags the rest with exactly where to look. Rule-based, runs offline, your code never leaves your machine.
+Every codebase has edge cases nobody tested. Maybe it's a guard clause, maybe a Pydantic constraint, maybe a docstring that says "raises ValueError" but no test enforces it. Quell scans your code, finds those gaps, writes pytest tests for the ones it can prove, and flags the rest with exactly where to look. Rule engine, runs offline, no API key needed.
 
 </details>
 
@@ -262,7 +262,7 @@ uv run quell find quell/
 
 ## Links
 
-- **Docs:** [quell.buildsbyshashank.tech/docs](https://quell.buildsbyshashank.tech/docs)
+- **Docs:** [quelltest.com/docs](https://quelltest.com/docs)
 - **How it works:** [docs/how-it-works.md](docs/how-it-works.md)
 - **CLI reference:** [docs/cli.md](docs/cli.md)
 - **PyPI:** [pypi.org/project/quelltest](https://pypi.org/project/quelltest/)

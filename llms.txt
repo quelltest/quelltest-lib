@@ -1,10 +1,8 @@
 # Quell
 
-> Untested edge cases will bite you in production. Quell finds them before they do.
+> Quell finds untested edge cases in Python codebases and writes verified pytest tests for them. It reads your docstrings, Pydantic models, and type annotations — extracts every testable requirement — then uses a 5-gate verification pipeline to write only tests that are proven to catch real bugs.
 
-Quell (`pip install quelltest`, CLI command `quell`) is an open-source Python developer tool that scans your docstrings, Pydantic models, and PySpark schemas, extracts every testable edge case, and sorts them into three buckets: WRITTEN (verified tests written to disk), SCAFFOLDED (stubs written for human completion), and FLAGGED (edge cases that need explanation). Every test Quell writes passes 5 gates before touching your files.
-
-The key differentiator is the 5-gate verification pipeline: every generated test must pass an AST validity check, an originality check, a security check, PASS on the original correct code, AND FAIL when the relevant code is deliberately violated. Only tests that clear all 5 gates are written.
+Quell (`pip install quelltest`, CLI command `quell`) is an open-source Python developer tool. Every test it writes must pass an AST validity check, an originality check, a security check, PASS on the original correct code, AND FAIL when the relevant code is deliberately violated. Only tests that clear all 5 gates are written to disk.
 
 ## Primary command
 
@@ -12,18 +10,18 @@ The key differentiator is the 5-gate verification pipeline: every generated test
 quell find src/
 ```
 
-Scans for untested edge cases and shows three-bucket output. Add `--fix` to write WRITTEN tests. Add `--format github` for CI annotations.
+Scans for untested edge cases and shows three-bucket output. Add `--fix` to write WRITTEN tests. Add `--auto` to skip confirmation prompts in CI.
 
 ## Docs
 
-- [Introduction](https://quell.buildsbyshashank.tech/docs): What Quell is
-- [Quickstart](https://quell.buildsbyshashank.tech/docs/quickstart): Scan your first project in 2 minutes
-- [How It Works](https://quell.buildsbyshashank.tech/docs/how-it-works): 5-gate pipeline and PRS
-- [CLI Reference](https://quell.buildsbyshashank.tech/docs/cli): All commands
-- [Configuration](https://quell.buildsbyshashank.tech/docs/configuration/pyproject): pyproject.toml options
-- [CI/CD Guide](https://quell.buildsbyshashank.tech/docs/guides/ci-cd): GitHub Actions integration
-- [SDK Reference](https://quell.buildsbyshashank.tech/docs/sdk/overview): Python API
-- [Constraint Kinds](https://quell.buildsbyshashank.tech/docs/reference/constraint-kinds): MUST_RAISE, BOUNDARY, ENUM_VALID, NOT_NULL, TYPE_CHECK, MUST_RETURN
+- [Introduction](https://quelltest.com/docs): What Quell is and how it fits in your workflow
+- [Quickstart](https://quelltest.com/docs/quickstart): Find your first untested edge case in under 5 minutes
+- [How It Works](https://quelltest.com/docs/how-it-works): 5-gate pipeline and three-bucket output explained
+- [CLI Reference](https://quelltest.com/docs/cli): All 7 commands documented
+- [Configuration](https://quelltest.com/docs/configuration/pyproject): pyproject.toml options, thresholds, LLM providers
+- [CI Integration](https://quelltest.com/docs/guides/ci-integration): GitHub Actions, GitLab CI, pre-commit
+- [Production Readiness Score](https://quelltest.com/docs/reference/prs): PRS formula and tiers
+- [Constraint Kinds](https://quelltest.com/docs/reference/constraint-kinds): MUST_RAISE, BOUNDARY, ENUM_VALID, NOT_NULL, TYPE_CHECK, MUST_RETURN
 
 ## Install
 
@@ -31,63 +29,54 @@ Scans for untested edge cases and shows three-bucket output. Add `--fix` to writ
 pip install quelltest
 ```
 
-## Quick example
-
+Optional extras:
 ```
-quell find src/
-quell find src/ --fix
-quell find src/ --fix --auto    # CI — skip prompts
+pip install quelltest[groq]      # Groq LLM fallback
+pip install quelltest[pyspark]   # PySpark schema scanning
 ```
 
 ## Three-bucket output
 
 ```
 ✓ WRITTEN  (8)    Tests written to disk. Passed all 5 gates.
-⚠ SCAFFOLDED (9)  Stubs written to tests/scaffold/. Finish the assertion.
+~ SCAFFOLDED (9)  Stubs written. Finish the assertion.
 ✗ FLAGGED  (6)    Cannot auto-test. Reason shown per item.
 
-PRS  72/100  🟡 Review Needed
-Edge case coverage: 73%  |  Avg confidence: 85%
+PRS  84/100  Production Ready
 ```
 
 ## Production Readiness Score (PRS)
 
-A 0–100 score computed from WRITTEN tests and their confidence scores:
-- +5 if all FLAGGED items are documented with `# quell: flagged`
-- -10 if any HIGH-confidence test is disabled with `@pytest.mark.skip`
+Formula: (WRITTEN × 1.0 + SCAFFOLDED × 0.5) / total_requirements × 100
 
-Tiers: GREEN ≥80 / YELLOW ≥60 / RED <60
+Tiers: 80-100 Production Ready / 60-79 Review Needed / 0-59 Needs Work
 
 ## All commands
 
 | Command | What it does |
 |---------|-------------|
-| `quell find src/` | Scan for untested edge cases, show three-bucket output |
-| `quell find src/ --fix` | Also write WRITTEN tests to disk |
-| `quell find src/ --fix --auto` | Same, skip confirmation (CI mode) |
-| `quell find src/ --format github` | GitHub Actions annotation format |
-| `quell score` | Show PRS score from last scan |
-| `quell score --badge` | Print SVG badge to stdout |
+| `quell find [PATH]` | Scan for untested edge cases, show three-bucket output |
+| `quell find [PATH] --fix` | Also write WRITTEN tests to disk |
+| `quell find [PATH] --fix --auto` | Same, skip confirmation (CI mode) |
+| `quell score [PATH]` | Show PRS score and per-file breakdown |
+| `quell score [PATH] --badge` | Print SVG badge to stdout |
 | `quell reproduce "<bug>"` | Convert bug description into a verified failing test |
-| `quell ci` | Exit 1 if PRS is below threshold |
+| `quell ci [PATH] --threshold N` | Exit non-zero if PRS is below threshold |
 | `quell init` | Add [tool.quell] to pyproject.toml |
-| `quell install --action` | Write GitHub Actions workflow |
-| `quell auth set --provider groq --key sk-...` | Configure LLM provider |
+| `quell install github-action` | Write GitHub Actions workflow |
+| `quell auth set KEY=value` | Configure LLM provider key |
 | `quell auth status` | Show current auth config |
+| `quell auth status --privacy` | Show exactly what gets transmitted |
 
 ## 5-gate pipeline
 
-Each candidate test passes 5 gates before being written:
-
 | Gate | Check |
 |------|-------|
-| Gate 1 | AST valid, imports resolve |
-| Gate 2 | Originality — not a copy of an existing test |
-| Gate 3 | Security — no forbidden operations |
-| Gate 4 | Passes on correct code (proves the test is right) |
-| Gate 5 | Fails on violated code (proves the test catches bugs) |
-
-Only Gate 4+5 survivors become WRITTEN tests. Earlier failures become SCAFFOLDED stubs.
+| Gate 1 | AST valid — parses to valid Python |
+| Gate 2 | Original — not already in any test file |
+| Gate 3 | Secure — no shell calls, no filesystem writes, no network |
+| Gate 4 | Passes Correct — test passes against original code |
+| Gate 5 | Fails Violated — test fails when the requirement is violated |
 
 ## Key facts
 
@@ -95,14 +84,12 @@ Only Gate 4+5 survivors become WRITTEN tests. Earlier failures become SCAFFOLDED
 - CLI command: quell
 - Version: 2.0.0
 - GitHub: https://github.com/quelltest/quelltest-lib
-- Website: https://quell.buildsbyshashank.tech
+- Website: https://quelltest.com
 - License: MIT
-- Author: Shashank Bindal
+- Author: Shashank Bindal (Gurugram, Haryana, India)
 - Python: 3.11+
-- Spec sources: Python docstrings, Pydantic v2 Field constraints, PySpark StructType
+- Spec sources: Python docstrings, Pydantic v2 Field constraints, PySpark StructType, type annotations
 - Constraint kinds: MUST_RAISE, MUST_RETURN, BOUNDARY, ENUM_VALID, NOT_NULL, TYPE_CHECK
-- LLM required: No (rule engine handles ~75%)
-- Default LLM provider: Groq (llama-3.3-70b-versatile) — fast, free tier available
+- Rule engine: handles ~75% of cases with no network calls and no API key
+- Default LLM provider (opt-in): Groq (llama-3.3-70b-versatile)
 - Other LLM providers: Anthropic Claude, OpenAI GPT-4, Ollama
-- Scaffold dir: tests/scaffold/ (auto-gitignored by quell init)
-- Report file: quell-report.json (project root)

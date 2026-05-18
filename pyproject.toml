@@ -5,22 +5,44 @@ build-backend = "hatchling.build"
 [project]
 name = "quelltest"
 version = "2.0.0"
-description = "Your code says what it should do. Quell proves it."
+description = "Find untested edge cases in Python code. 5-gate verified test generation from docstrings, Pydantic models, and type annotations. Production Readiness Score."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Shashank Bindal", email = "bindalshashank.89@gmail.com" }]
 keywords = [
-    "testing", "test-generation", "docstring", "pydantic",
-    "verified-tests", "tdd", "pytest", "specification-testing"
+    "testing",
+    "test-generation",
+    "edge-cases",
+    "docstring",
+    "pydantic",
+    "verified-tests",
+    "pytest",
+    "specification-testing",
+    "production-readiness",
+    "gate-5",
+    "mutation-testing",
+    "property-testing",
+    "tdd",
+    "type-annotations",
+    "guard-clauses",
+    "automated-testing",
+    "test-coverage",
+    "code-quality",
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Testing",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Code Generators",
+    "Typing :: Typed",
 ]
 dependencies = [
     "typer>=0.12.0",
@@ -54,9 +76,11 @@ dev = [
 quell = "quell.cli:app"
 
 [project.urls]
-Homepage = "https://quell.buildsbyshashank.tech"
-Documentation = "https://quell.buildsbyshashank.tech/docs"
-Repository = "https://github.com/shashank7109/quelltest_lib"
+Homepage = "https://quelltest.com"
+Documentation = "https://quelltest.com/docs"
+Repository = "https://github.com/quelltest/quelltest-lib"
+Changelog = "https://quelltest.com/changelog"
+"Bug Tracker" = "https://github.com/quelltest/quelltest-lib/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["quell"]
