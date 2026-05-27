@@ -85,6 +85,8 @@ class PySparkRuleEngine:
 
     def _not_null(self, req: Requirement) -> GeneratedTest:
         col = (req.violation_input or {}).get("column", "col")
+        if not col.isidentifier():
+            raise ValueError(f"Invalid PySpark column name: {col!r}")
         name = self._name(req)
         code = f'''def {name}(spark):
     """Quell PySpark: column '{col}' must not be null — {req.raw_spec_text}"""
@@ -108,6 +110,10 @@ class PySparkRuleEngine:
     def _type_check(self, req: Requirement) -> GeneratedTest:
         col = (req.violation_input or {}).get("column", "col")
         type_name = (req.violation_input or {}).get("type", "StringType")
+        if not col.isidentifier():
+            raise ValueError(f"Invalid PySpark column name: {col!r}")
+        if not type_name.isidentifier() or type_name not in VALID_VALUES:
+            raise ValueError(f"Invalid PySpark type name: {type_name!r}")
         valid = VALID_VALUES.get(type_name, '"test"')
         name = self._name(req)
         code = f'''def {name}(spark):

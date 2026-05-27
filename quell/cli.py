@@ -225,6 +225,7 @@ def cmd_find(
     cmd_scan(
         target=target,
         fix=fix,
+        auto=auto,
         suggest=False,
         llm=use_llm,
         no_llm=False,
@@ -237,6 +238,7 @@ def cmd_find(
 def cmd_scan(
     target: Path = typer.Argument(Path("."), help="File or directory to scan"),
     fix: bool = typer.Option(False, "--fix", help="Generate failing tests for each gap"),
+    auto: bool = typer.Option(False, "--auto", help="Skip confirmation prompts (for CI)"),
     suggest: bool = typer.Option(False, "--suggest", help="Also suggest code fixes via LLM (requires --llm)"),
     llm: bool = typer.Option(False, "--llm", help="Enable LLM for guard types the rule engine can't handle"),
     no_llm: bool = typer.Option(False, "--no-llm", help="[deprecated] Rule-based only, no LLM (now the default)"),
@@ -510,7 +512,7 @@ def cmd_scan(
                     )
                     console.print(f"  {fix_suggestion.explanation}")
                     console.print(Syntax(fix_suggestion.diff, "diff", theme="monokai"))
-                    apply = typer.confirm("  Apply this fix?", default=False)
+                    apply = False if auto else typer.confirm("  Apply this fix?", default=False)
                     if apply:
                         req.target_file.write_text(
                             req.target_file.read_text(encoding="utf-8").replace(
@@ -526,8 +528,8 @@ def cmd_scan(
                         "  [yellow]Fix suggested but not verified — review manually[/yellow]"
                     )
                     console.print(Syntax(fix_suggestion.diff, "diff", theme="monokai"))
-
-            write = typer.confirm("  Write this test?", default=True)
+ 
+            write = True if auto else typer.confirm("  Write this test?", default=True)
             if write:
                 if writer.write(candidate, req.id):
                     console.print(
