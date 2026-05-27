@@ -824,7 +824,7 @@ def cmd_check(  # noqa: PLR0913
             except Exception as exc:
                 console.print(f"[yellow]QuellGraph unavailable: {exc}[/yellow]")
 
-    q = Quell(project_root=project_root)
+    q = Quell(project_root=project_root, config=config)
 
     with console.status("[bold blue]Scanning specifications...[/bold blue]"):
         result = q.check(target, sources=src_list, fix=fix)
@@ -933,7 +933,8 @@ def cmd_reproduce(
     """Convert a bug description into a verified failing test."""
     from quell.sdk import Quell
 
-    q = Quell(project_root=project_root)
+    config = _load_config(project_root)
+    q = Quell(project_root=project_root, config=config)
 
     with console.status("[bold blue]Analyzing bug description...[/bold blue]"):
         written = q.reproduce(description, file=file)
@@ -958,7 +959,8 @@ def cmd_prove(
     """Show requirement coverage score for a file or function."""
     from quell.sdk import Quell
 
-    q = Quell(project_root=project_root)
+    config = _load_config(project_root)
+    q = Quell(project_root=project_root, config=config)
 
     with console.status("[bold blue]Checking coverage...[/bold blue]"):
         score = q.prove(file, function=function)
@@ -1116,7 +1118,8 @@ def cmd_ci(
     """CI mode: check requirements and exit 1 if below threshold."""
     from quell.sdk import Quell
 
-    q = Quell(project_root=project_root)
+    config = _load_config(project_root)
+    q = Quell(project_root=project_root, config=config)
     result = q.check(target)
 
     console.print(f"Quell Score: {result.score:.0%} | Threshold: {threshold:.0%}")
