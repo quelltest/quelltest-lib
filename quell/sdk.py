@@ -48,8 +48,12 @@ class Quell:
         llm: str = "anthropic",
         model: str | None = None,
         project_root: str | Path = ".",
+        config: QuellConfig | None = None,
     ):
-        self.config = QuellConfig(llm_provider=llm)
+        if config is not None:
+            self.config = config
+        else:
+            self.config = QuellConfig(llm_provider=llm)
         if model:
             self.config = self.config.model_copy(update={"llm_model": model})
         self.root = Path(project_root).resolve()
