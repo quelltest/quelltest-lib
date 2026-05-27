@@ -822,7 +822,7 @@ def cmd_check(  # noqa: PLR0913
             except Exception as exc:
                 console.print(f"[yellow]QuellGraph unavailable: {exc}[/yellow]")
 
-    q = Quell(project_root=project_root)
+    q = Quell(project_root=project_root, config=config)
 
     with console.status("[bold blue]Scanning specifications...[/bold blue]"):
         result = q.check(target, sources=src_list, fix=fix)
