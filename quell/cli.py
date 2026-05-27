@@ -1294,7 +1294,7 @@ def _install_precommit_hook(project_root: Path) -> None:
     hooks:
       - id: quell
         name: Quell — verify requirements
-        entry: quell check --diff-only --no-llm --auto
+        entry: quell find --fix --auto
         language: system
         types: [python]
         pass_filenames: false
