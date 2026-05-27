@@ -25,6 +25,27 @@ from quell.core.models import (
 
 
 @dataclass
+class VerifyResult:
+    """Result of quell.verify_test()."""
+    verified: bool
+    kills_mutants: int
+    score_delta: float
+    explanation: str
+    status: str
+
+
+@dataclass
+class ScoreResult:
+    """Result of quell.get_score()."""
+    total: float
+    percentage: int
+    by_file: dict[str, float]
+    total_mutants: int
+    killed_mutants: int
+    survived_mutants: int
+
+
+@dataclass
 class CheckResult:
     """Result of quell.check()."""
     requirements: list[Requirement]
@@ -85,6 +106,151 @@ class Quell:
         """Calculate project-wide Quell Score."""
         from quell.score.calculator import calculate_score
         return calculate_score(self.root)
+
+    def verify_test(self, test_code: str, source_file: str | Path) -> VerifyResult:
+        """Verify that a test actually kills mutations in the source file."""
+        from quell.core.verifier import Verifier
+        from quell.core.models import GeneratedTest, VerificationStatus
+        from quell.spec.code_guard_reader import CodeGuardReader
+        from quell.spec.docstring_reader import DocstringReader
+        from quell.spec.type_reader import TypeReader
+        from quell.llm.client import LLMClient
+        import re
+
+        src_path = Path(source_file).resolve()
+        
+        # Extract all requirements for the file
+        reqs = []
+        reqs.extend(CodeGuardReader().read(src_path))
+        try:
+            llm = LLMClient.from_config(self.config)
+            reqs.extend(DocstringReader(llm).read(src_path))
+        except Exception:
+            reqs.extend(DocstringReader(None).read(src_path))
+        reqs.extend(TypeReader().read(src_path))
+        
+        if self.config.enable_pyspark:
+            from quell.spec.pyspark_reader import PySparkReader
+            reqs.extend(PySparkReader().read(src_path))
+
+        # Find test function name
+        test_func_match = re.search(r'def\s+(test_\w+)', test_code)
+        if not test_func_match:
+            return VerifyResult(
+                verified=False,
+                kills_mutants=0,
+                score_delta=0.0,
+                explanation="No test function (test_*) found in test code.",
+                status="error",
+            )
+        test_func_name = test_func_match.group(1)
+        
+        # Filter requirements that match the function under test
+        # Test function name might look like test_quell_myfunc_constraint or test_myfunc
+        target_reqs = []
+        for req in reqs:
+            if req.target_function and (req.target_function in test_func_name):
+                target_reqs.append(req)
+        
+        # Fallback: run against all requirements in this file if no function match
+        if not target_reqs:
+            target_reqs = reqs
+
+        if not target_reqs:
+            return VerifyResult(
+                verified=False,
+                kills_mutants=0,
+                score_delta=0.0,
+                explanation=f"No requirements found to verify in {src_path.name}.",
+                status="doesnt_catch_violation",
+            )
+
+        verifier = Verifier(self.config, project_root=self.root)
+        verified_count = 0
+        last_status = VerificationStatus.DOESNT_CATCH_VIOLATION
+        explanation_parts = []
+
+        for req in target_reqs:
+            candidate = GeneratedTest(
+                requirement_id=req.id,
+                test_function_name=test_func_name,
+                test_code=test_code,
+                test_file_path=src_path.parent / "temp_verify_test.py",
+                explanation="Temporary verification test",
+                generated_by="verify_test",
+            )
+            res = verifier.verify(req, candidate)
+            if res.status == VerificationStatus.VERIFIED:
+                verified_count += 1
+                last_status = VerificationStatus.VERIFIED
+            else:
+                last_status = res.status
+                if res.error_message:
+                    explanation_parts.append(f"{req.id}: {res.error_message}")
+
+        verified = verified_count > 0
+        if verified:
+            explanation = f"Test successfully verified! Kills {verified_count} mutant(s)."
+            status_str = "verified"
+        else:
+            explanation = "Test failed verification. " + "; ".join(explanation_parts)
+            status_str = last_status.value
+
+        score_delta = (1.0 / len(reqs)) if (verified and reqs) else 0.0
+
+        return VerifyResult(
+            verified=verified,
+            kills_mutants=verified_count,
+            score_delta=score_delta,
+            explanation=explanation,
+            status=status_str,
+        )
+
+    def get_score(self, path: str | Path | None = None) -> ScoreResult:
+        """Get current mutation score. Runs mutmut if needed."""
+        from quell.score.calculator import calculate_score
+        project_score = calculate_score(self.root)
+        
+        if path is not None:
+            target_path = Path(path).resolve()
+            found = None
+            for f in project_score.files:
+                if f.file_path.resolve() == target_path:
+                    found = f
+                    break
+            if found:
+                by_file = {str(found.file_path): found.quell_score}
+                total_mutants = found.total_requirements
+                killed_mutants = found.covered_requirements
+                return ScoreResult(
+                    total=found.quell_score,
+                    percentage=found.percentage,
+                    by_file=by_file,
+                    total_mutants=total_mutants,
+                    killed_mutants=killed_mutants,
+                    survived_mutants=total_mutants - killed_mutants,
+                )
+            else:
+                return ScoreResult(
+                    total=0.0,
+                    percentage=0,
+                    by_file={},
+                    total_mutants=0,
+                    killed_mutants=0,
+                    survived_mutants=0,
+                )
+        else:
+            by_file = {str(f.file_path): f.quell_score for f in project_score.files}
+            total_mutants = sum(f.total_requirements for f in project_score.files)
+            killed_mutants = sum(f.covered_requirements for f in project_score.files)
+            return ScoreResult(
+                total=project_score.total_score,
+                percentage=project_score.percentage,
+                by_file=by_file,
+                total_mutants=total_mutants,
+                killed_mutants=killed_mutants,
+                survived_mutants=total_mutants - killed_mutants,
+            )
 
     # ── internals ─────────────────────────────────────────────────────────────
 
