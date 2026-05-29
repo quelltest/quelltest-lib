@@ -261,7 +261,7 @@ class SurvivedMutant(BaseModel):
     line_end: int
     original_code: str
     mutated_code: str
-    
+
     # Enriched fields added during analysis
     operator: MutationOperator | None = None
     function_name: str | None = None

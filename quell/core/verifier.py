@@ -46,9 +46,9 @@ from quell.core.models import (
     GeneratedTest,
     QuellConfig,
     Requirement,
+    SurvivedMutant,
     VerificationResult,
     VerificationStatus,
-    SurvivedMutant,
 )
 from quell.infra.specs import _assert_no_credential_reads
 
@@ -152,11 +152,11 @@ class Verifier:
         """Run full two-phase verification. Always restores source in finally."""
         start = time.time()
         temp = self._write_temp(test)
-        
+
         # Create a run-specific temp directory for copy-on-write violation
         run_temp_dir = self.backup_dir / f"run_{time.time_ns()}"
         run_temp_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # Determine relative path from project source root
         cwd = self._resolve_cwd(req.target_file)
         rel_dir = cwd
@@ -166,7 +166,7 @@ class Verifier:
                 break
         rel_path = req.target_file.relative_to(rel_dir)
         temp_target_file = run_temp_dir / rel_path
-        
+
         bak = None
         try:
             # Step 1: test must PASS on correct code
@@ -495,7 +495,7 @@ class MutantVerifier(Verifier):
         self, mutant: SurvivedMutant, test: GeneratedTest
     ) -> VerificationResult:
         """Verify a test kills a mutant. Maps SurvivedMutant to a Requirement."""
-        from quell.core.models import Requirement, ConstraintKind, SpecSource
+        from quell.core.models import ConstraintKind, Requirement, SpecSource
         req = Requirement(
             id=mutant.id,
             description=f"Kill mutant {mutant.id}",
