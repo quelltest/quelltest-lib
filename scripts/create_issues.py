@@ -1,8 +1,8 @@
 """Create quell_spec6 issues in quelltest/quelltest_lib upstream."""
 import json
 import os
-import urllib.request
 import ssl
+import urllib.request
 
 TOKEN = os.environ["GITHUB_TOKEN"]
 REPO = "quelltest/quelltest_lib"

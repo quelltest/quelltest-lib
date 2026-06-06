@@ -40,8 +40,10 @@ app = typer.Typer(
 )
 auth_app = typer.Typer(help="Manage Quell authentication")
 graph_app = typer.Typer(help="QuellGraph build and inspection commands")
+sync_app = typer.Typer(help="Manage cloud sync (Pro/Team) — push, status, history, unlink")
 app.add_typer(auth_app, name="auth")
 app.add_typer(graph_app, name="graph")
+app.add_typer(sync_app, name="sync")
 
 console = Console()
 
@@ -201,6 +203,7 @@ def cmd_find(
     fix: bool = typer.Option(False, "--fix", help="Write tests for confident cases (WRITTEN bucket)"),
     auto: bool = typer.Option(False, "--auto", help="Skip confirmation prompts (for CI)"),
     use_llm: bool = typer.Option(False, "--use-llm", help="Enable LLM fallback (requires quell auth)"),
+    sync: bool = typer.Option(False, "--sync", help="Push report to cloud after scan (Pro/Team only)"),
     project_root: Path = typer.Option(Path("."), "--root"),
     fmt: str = typer.Option("console", "--format", "-f", help="Output format: console or github"),
 ) -> None:
@@ -215,6 +218,7 @@ def cmd_find(
     quell find src/ --fix            also write tests for confident cases
     quell find src/ --fix --auto     skip prompts (use in CI)
     quell find src/ --fix --use-llm  enable LLM for harder cases (needs auth)
+    quell find src/ --fix --sync     scan, write tests, push report to cloud
     """
     import sys as _sys
     _sys.stderr.write(
@@ -231,6 +235,9 @@ def cmd_find(
         project_root=project_root,
         fmt=fmt,
     )
+
+    if sync:
+        _do_sync(project_root)
 
 
 @app.command("scan")
@@ -948,6 +955,7 @@ def cmd_score(
     target: Path = typer.Argument(Path("."), help="File or directory to score"),
     badge: bool = typer.Option(False, "--badge", help="Print SVG badge to stdout"),
     json_out: bool = typer.Option(False, "--json", help="Output score as JSON"),
+    sync: bool = typer.Option(False, "--sync", help="Push PRS snapshot to cloud (Pro/Team only)"),
     project_root: Path = typer.Option(Path("."), "--root"),
 ) -> None:
     """Show Production Readiness Score (PRS) for a path.
@@ -1075,6 +1083,9 @@ def cmd_score(
         + (f"\n\n  [dim]Modifiers: {', '.join(prs.modifiers)}[/dim]" if prs.modifiers else ""),
         title="quell score",
     ))
+
+    if sync:
+        _do_sync(project_root)
 
 
 @app.command("ci")
@@ -1598,3 +1609,193 @@ def auth_status_v2(
     console.print(f"  Mode     : {creds.mode}")
     console.print(f"  Tier     : {creds.tier}")
     console.print(f"  Key      : {key_status}")
+
+
+# ── Cloud Sync helpers and commands (spec8 §11.3) ─────────────────────────────
+
+def _do_sync(project_root: Path) -> None:
+    """Shared sync logic called from --sync flag on find/score."""
+    from quell.auth.storage import load_credentials
+    from quell.sync.client import push_report
+    from quell.sync.payload import build_sync_payload
+    from quell.sync.sanitizer import SanitizationError, sanitize
+
+    creds = load_credentials()
+    tier = getattr(creds, "tier", "free") if creds else "free"
+    if tier == "free":
+        console.print("[yellow]Sync requires a Pro or Team account.[/yellow]")
+        console.print("  Upgrade at [bold]quelltest.com/pricing[/bold]")
+        return
+
+    report_path = project_root / ".quell" / "report.json"
+    if not report_path.exists():
+        # fall back to quell-report.json at root
+        report_path = project_root / "quell-report.json"
+
+    config = _load_config(project_root)
+    payload = build_sync_payload(
+        report_path=report_path,
+        project_root=project_root,
+        project_alias=config.sync_project_alias,
+    )
+    if payload is None:
+        console.print("[yellow]Sync: no report found. Run quell find first.[/yellow]")
+        return
+
+    try:
+        sanitize(payload.model_dump(mode="json"))
+    except SanitizationError as exc:
+        console.print(f"[red]Sync aborted: {exc}[/red]")
+        return
+
+    result = push_report(payload)
+    if result.ok:
+        console.print(f"[green]Report synced -> {result.dashboard_url}[/green]")
+    else:
+        console.print(f"[yellow]Sync warning: {result.reason}[/yellow]")
+
+
+@sync_app.command("push")
+def sync_push(
+    project_root: Path = typer.Option(Path("."), "--root"),
+) -> None:
+    """Manually push the last .quell/report.json to quelltest.com."""
+    _do_sync(project_root)
+
+
+@sync_app.command("status")
+def sync_status(
+    privacy: bool = typer.Option(False, "--privacy", help="Show exactly what gets sent"),
+    project_root: Path = typer.Option(Path("."), "--root"),
+) -> None:
+    """Show cloud sync state, last push timestamp, and tier.
+
+    quell sync status            # show sync state
+    quell sync status --privacy  # print what leaves your machine
+    """
+    import json as _j
+
+    from quell.auth.storage import load_credentials
+
+    config = _load_config(project_root)
+    creds = load_credentials()
+    tier = getattr(creds, "tier", "free") if creds else "free"
+
+    sync_enabled = config.sync or (tier != "free")
+
+    if privacy:
+        console.print("[bold]Sync privacy statement:[/bold]\n")
+        console.print(f"  Sync enabled : {'yes' if sync_enabled else 'no'} ({tier} tier)")
+        console.print(f"  Project      : {config.sync_project_alias or project_root.resolve().name}")
+        console.print("  What gets sent:")
+        console.print("    - test names, confidence scores, flagged reasons")
+        console.print("    - PRS, file:line locations for flagged items")
+        console.print("  What stays local:")
+        console.print("    - all source code, all test bodies, all docstrings")
+        console.print("  Full schema: https://quelltest.com/docs/sync-payload")
+        return
+
+    history_file = project_root / ".quell" / "sync_history.json"
+    last_push = "never"
+    if history_file.exists():
+        try:
+            history = _j.loads(history_file.read_text())
+            if history:
+                last_push = history[-1].get("run_at", "unknown")
+        except Exception:  # noqa: BLE001
+            pass
+
+    console.print(f"  Sync enabled : {'yes' if sync_enabled else 'no'} ({tier} tier)")
+    console.print(f"  Project alias: {config.sync_project_alias or '(not set)'}")
+    console.print(f"  Last push    : {last_push}")
+    if not sync_enabled:
+        console.print("\n  To enable: add [dim]sync = true[/dim] to [tool.quell] in pyproject.toml")
+        console.print("  or use [dim]--sync[/dim] flag on quell find / quell score")
+
+
+@sync_app.command("history")
+def sync_history(
+    project_root: Path = typer.Option(Path("."), "--root"),
+) -> None:
+    """List the last 30 sync pushes with PRS values."""
+    import json as _j
+
+    history_file = project_root / ".quell" / "sync_history.json"
+    if not history_file.exists():
+        console.print("[yellow]No sync history found.[/yellow]")
+        console.print("  Run [bold]quell find --sync[/bold] to create one.")
+        return
+
+    try:
+        history = _j.loads(history_file.read_text())
+    except Exception:  # noqa: BLE001
+        console.print("[red]Could not read sync history.[/red]")
+        return
+
+    table = Table(title="Sync History (last 30 pushes)")
+    table.add_column("Run at", style="dim")
+    table.add_column("PRS", justify="right")
+    table.add_column("Project")
+
+    for entry in history[-30:][::-1]:
+        prs = entry.get("prs", "-")
+        color = "green" if prs >= 80 else "yellow" if prs >= 60 else "red"
+        table.add_row(
+            entry.get("run_at", "-"),
+            f"[{color}]{prs}[/{color}]",
+            entry.get("project_id", "-")[:16] + "...",
+        )
+    console.print(table)
+
+
+@sync_app.command("unlink")
+def sync_unlink(
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+    project_root: Path = typer.Option(Path("."), "--root"),
+) -> None:
+    """Remove this project from quelltest.com and delete all remote data."""
+    import json as _j
+
+    from quell.sync.client import _load_token
+
+    config = _load_config(project_root)
+    alias = config.sync_project_alias or project_root.resolve().name
+
+    if not yes:
+        confirmed = typer.confirm(
+            f"Delete all cloud data for '{alias}'? This cannot be undone."
+        )
+        if not confirmed:
+            console.print("Aborted.")
+            return
+
+    token = _load_token()
+    if not token:
+        console.print("[red]Not authenticated. Run `quell auth login` first.[/red]")
+        raise typer.Exit(1)
+
+    try:
+        import httpx
+        from quell.sync.payload import _project_id
+
+        pid = _project_id(project_root)
+        resp = httpx.delete(
+            f"https://api.quelltest.com/v1/projects/{pid}",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10.0,
+        )
+        if resp.status_code in (200, 204):
+            console.print(f"[green]Project '{alias}' unlinked. All cloud data deleted.[/green]")
+            # Clear local history
+            history_file = project_root / ".quell" / "sync_history.json"
+            if history_file.exists():
+                history_file.write_text(_j.dumps([]))
+        else:
+            console.print(f"[red]Unlink failed: server returned {resp.status_code}[/red]")
+            raise typer.Exit(1)
+    except ImportError:
+        console.print("[red]httpx not installed. Run: pip install httpx[/red]")
+        raise typer.Exit(1)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]Unlink failed: {exc}[/red]")
+        raise typer.Exit(1)

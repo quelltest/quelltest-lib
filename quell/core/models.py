@@ -166,6 +166,11 @@ class QuellConfig(BaseModel):
     prs_threshold: int = 60         # minimum PRS to pass `quell ci`
     scaffold_dir: Path = Path("tests/scaffold")  # where SCAFFOLDED stubs go
     use_llm: bool = False           # opt-in LLM fallback (off by default)
+    # v2.0.1 additions — cloud sync (spec8 §11.8)
+    sync: bool = False                          # opt-in; never auto-sync
+    sync_project_alias: str = ""               # human name in dashboard
+    sync_include_scaffolded: bool = True       # include scaffolded metadata
+    sync_include_flagged_locations: bool = True  # include file:line for flagged
 
 
 # ── v2.0.0 models: confidence scoring and three-bucket output ─────────────────
