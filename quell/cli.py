@@ -406,6 +406,7 @@ def cmd_scan(
     verifier = Verifier(config, project_root=project_root)
     writer = Writer(config)
     fixed = 0
+    scaffolded_files: set[str] = set()  # deduplicated stub file paths
 
     # Report tracking — written to quell-report.json at the end
     report_items: list[dict[str, Any]] = []
@@ -466,7 +467,7 @@ def cmd_scan(
                         "guard variable is a local variable (DB result, computed value) "
                         "not a function parameter — can't inject via stub"
                     )
-                console.print(f"  [dim]Skipped — {item['reason']}[/dim]")
+                _write_scaffold(req, None, 2, config, project_root, item, scaffolded_files, console, fmt)
                 report_items.append(item)
                 continue
         elif synthesizer:
@@ -479,12 +480,14 @@ def cmd_scan(
                 f"  [dim]Skipped ({req.constraint_kind.value}) — "
                 "no rule for this guard type. Pass --llm to use LLM.[/dim]"
             )
+            _write_scaffold(req, None, 1, config, project_root, item, scaffolded_files, console, fmt)
             report_items.append(item)
             continue
 
         if not candidate:
             item["outcome"] = "skipped_no_gen"
             item["reason"] = "synthesizer returned no test"
+            _write_scaffold(req, None, 2, config, project_root, item, scaffolded_files, console, fmt)
             report_items.append(item)
             continue
 
@@ -569,6 +572,31 @@ def cmd_scan(
 
     # Always write report
     _write_scan_report(project_root, str(target), all_requirements, gaps, report_items, fixed, fmt)
+
+
+def _write_scaffold(
+    req: Any,
+    candidate: Any,
+    gates_passed: int,
+    config: Any,
+    project_root: Path,
+    item: dict[str, Any],
+    scaffolded_files: set[str],
+    console: Any,
+    fmt: str,
+) -> None:
+    """Write a SCAFFOLDED stub and update item with the stub path."""
+    try:
+        from quell.core.scaffold import ensure_scaffold_gitignored, write_scaffold_stub
+        scaffold_dir = project_root / str(config.scaffold_dir)
+        stub_path = write_scaffold_stub(req, candidate, gates_passed, scaffold_dir)
+        ensure_scaffold_gitignored(project_root, scaffold_dir)
+        item["scaffold_file"] = str(stub_path)
+        scaffolded_files.add(str(stub_path))
+        if fmt != "github":
+            console.print(f"  [dim]Scaffold written → {stub_path.relative_to(project_root)}[/dim]")
+    except Exception:
+        pass  # scaffold write is best-effort, never breaks the main flow
 
 
 def _summarize_pytest_failure(out: str) -> str:
@@ -1146,6 +1174,11 @@ enable_pyspark = false
     console.print("[green]Added [tool.quell] to pyproject.toml[/green]")
     console.print("  LLM fallback is off by default (use_llm = false).")
     console.print("  To enable: [bold]quell auth set --provider groq --key sk-...[/bold]")
+
+    from quell.core.scaffold import ensure_scaffold_gitignored
+    scaffold_dir_path = project_root / "tests" / "scaffold"
+    ensure_scaffold_gitignored(project_root, scaffold_dir_path)
+    console.print(f"  Scaffold dir added to .gitignore: [dim]{scaffold_dir_path.relative_to(project_root)}[/dim]")
 
 
 @app.command("pr")

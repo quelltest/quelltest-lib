@@ -57,3 +57,68 @@ def test_target_function_set_correctly(sample_payments_path: Path) -> None:
 
 def test_source_name() -> None:
     assert DocstringReader().source_name == "docstring"
+
+
+class TestMultilineRaises:
+    """Regression tests for issue #4 — multiline Raises: continuation lines."""
+
+    def _read(self, tmp_path: Path, src: str) -> list:
+        f = tmp_path / "mod.py"
+        f.write_text(src)
+        return DocstringReader().read(f)
+
+    def test_single_line_raises_still_works(self, tmp_path: Path) -> None:
+        src = '''
+def pay(amount):
+    """
+    Raises:
+        ValueError: if amount <= 0
+    """
+'''
+        reqs = self._read(tmp_path, src)
+        assert len(reqs) == 1
+        assert "ValueError" in reqs[0].description
+
+    def test_multiline_condition_captured(self, tmp_path: Path) -> None:
+        src = '''
+def pay(amount, currency):
+    """
+    Raises:
+        ValueError: if amount <= 0,
+            or if currency is unsupported
+    """
+'''
+        reqs = self._read(tmp_path, src)
+        assert len(reqs) == 1
+        assert "ValueError" in reqs[0].description
+        assert "unsupported" in reqs[0].description
+
+    def test_two_exceptions_each_captured(self, tmp_path: Path) -> None:
+        src = '''
+def pay(amount, currency):
+    """
+    Raises:
+        ValueError: if amount <= 0
+        TypeError: if currency is not a string
+    """
+'''
+        reqs = self._read(tmp_path, src)
+        kinds = {r.description for r in reqs}
+        assert any("ValueError" in d for d in kinds)
+        assert any("TypeError" in d for d in kinds)
+
+    def test_second_exception_with_continuation(self, tmp_path: Path) -> None:
+        src = '''
+def pay(amount, currency):
+    """
+    Raises:
+        ValueError: if amount <= 0,
+            or negative
+        TypeError: if currency is not a string,
+            must be ISO 4217
+    """
+'''
+        reqs = self._read(tmp_path, src)
+        assert len(reqs) == 2
+        assert any("negative" in r.description for r in reqs)
+        assert any("ISO 4217" in r.description for r in reqs)
