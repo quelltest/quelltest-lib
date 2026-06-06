@@ -1809,6 +1809,7 @@ def sync_unlink(
 
     try:
         import httpx
+
         from quell.sync.payload import _project_id
 
         pid = _project_id(project_root)

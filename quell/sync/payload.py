@@ -121,7 +121,7 @@ def build_sync_payload(
         return SyncPayload(
             project_id=pid,
             project_alias=alias,
-            run_at=datetime.datetime.now(datetime.timezone.utc),
+            run_at=datetime.datetime.now(datetime.UTC),
             quell_version=__version__,
             prs=prs,
             prs_delta=prs_delta,

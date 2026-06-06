@@ -7,10 +7,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from quell.sync.models import EdgeCaseCounts, FlaggedMeta, ScaffoldedMeta, SyncPayload, WrittenTestMeta
+from quell.sync.models import EdgeCaseCounts, SyncPayload, WrittenTestMeta
 from quell.sync.payload import build_sync_payload
 from quell.sync.sanitizer import SanitizationError, sanitize
-
 
 # ── SyncPayload schema ─────────────────────────────────────────────────────────
 
@@ -19,7 +18,7 @@ def test_sync_payload_round_trips_json() -> None:
     payload = SyncPayload(
         project_id="abc123",
         project_alias="payments-service",
-        run_at=datetime.datetime(2026, 6, 6, 12, 0, 0, tzinfo=datetime.timezone.utc),
+        run_at=datetime.datetime(2026, 6, 6, 12, 0, 0, tzinfo=datetime.UTC),
         quell_version="2.0.1",
         prs=71,
         prs_delta=12,
@@ -56,7 +55,7 @@ def _valid_payload_dict() -> dict:
     return {
         "project_id": "abc",
         "project_alias": "svc",
-        "run_at": datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc).isoformat(),
+        "run_at": datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC).isoformat(),
         "quell_version": "2.0.1",
         "prs": 71,
         "prs_delta": 0,
@@ -183,15 +182,14 @@ def test_push_report_returns_false_without_httpx() -> None:
     import sys
     httpx_bak = sys.modules.pop("httpx", None)
     try:
-        from quell.sync.client import push_report
-        from quell.sync.payload import build_sync_payload
-        payload = build_sync_payload  # just need something truthy
         # We need a real payload; fake one
         import datetime
+
+        from quell.sync.client import push_report
         real_payload = SyncPayload(
             project_id="x",
             project_alias="svc",
-            run_at=datetime.datetime.now(datetime.timezone.utc),
+            run_at=datetime.datetime.now(datetime.UTC),
             quell_version="2.0.1",
             prs=0,
             prs_delta=0,
@@ -215,7 +213,7 @@ def test_push_report_handles_401() -> None:
     real_payload = SyncPayload(
         project_id="x",
         project_alias="svc",
-        run_at=datetime.datetime.now(datetime.timezone.utc),
+        run_at=datetime.datetime.now(datetime.UTC),
         quell_version="2.0.1",
         prs=0,
         prs_delta=0,
@@ -224,6 +222,7 @@ def test_push_report_handles_401() -> None:
 
     with patch.dict(sys.modules, {"httpx": mock_httpx}):
         from importlib import reload
+
         import quell.sync.client as client_mod
         reload(client_mod)
         result = client_mod.push_report(real_payload, token="tok")
@@ -243,7 +242,7 @@ def test_push_report_handles_429() -> None:
     real_payload = SyncPayload(
         project_id="x",
         project_alias="svc",
-        run_at=datetime.datetime.now(datetime.timezone.utc),
+        run_at=datetime.datetime.now(datetime.UTC),
         quell_version="2.0.1",
         prs=0,
         prs_delta=0,
@@ -252,6 +251,7 @@ def test_push_report_handles_429() -> None:
 
     with patch.dict(sys.modules, {"httpx": mock_httpx}):
         from importlib import reload
+
         import quell.sync.client as client_mod
         reload(client_mod)
         result = client_mod.push_report(real_payload, token="tok")
