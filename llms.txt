@@ -1,8 +1,10 @@
 # Quell
 
-> Quell finds untested edge cases in Python codebases and writes verified pytest tests for them. It reads your docstrings, Pydantic models, and type annotations — extracts every testable requirement — then uses a 5-gate verification pipeline to write only tests that are proven to catch real bugs.
+> Untested edge cases will bite you in production. Quell finds them before they do.
 
-Quell (`pip install quelltest`, CLI command `quell`) is an open-source Python developer tool. Every test it writes must pass an AST validity check, an originality check, a security check, PASS on the original correct code, AND FAIL when the relevant code is deliberately violated. Only tests that clear all 5 gates are written to disk.
+Quell (`pip install quelltest`, CLI command `quell`) is an open-source Python developer tool that scans your docstrings, Pydantic models, and PySpark schemas, extracts every testable edge case, and sorts them into three buckets: WRITTEN (verified tests written to disk), SCAFFOLDED (stubs written for human completion), and FLAGGED (edge cases that need explanation). Every test Quell writes passes 5 gates before touching your files.
+
+The key differentiator is the 5-gate verification pipeline: every generated test must pass an AST validity check, an originality check, a security check, PASS on the original correct code, AND FAIL when the relevant code is deliberately violated. Only tests that clear all 5 gates are written.
 
 ## Primary command
 
@@ -38,45 +40,60 @@ pip install quelltest[pyspark]   # PySpark schema scanning
 ## Three-bucket output
 
 ```
+quell find src/
+quell find src/ --fix
+quell find src/ --fix --auto    # CI — skip prompts
+```
+
+## Three-bucket output
+
+```
 ✓ WRITTEN  (8)    Tests written to disk. Passed all 5 gates.
-~ SCAFFOLDED (9)  Stubs written. Finish the assertion.
+⚠ SCAFFOLDED (9)  Stubs written to tests/scaffold/. Finish the assertion.
 ✗ FLAGGED  (6)    Cannot auto-test. Reason shown per item.
 
-PRS  84/100  Production Ready
+PRS  72/100  🟡 Review Needed
+Edge case coverage: 73%  |  Avg confidence: 85%
 ```
 
 ## Production Readiness Score (PRS)
 
-Formula: (WRITTEN × 1.0 + SCAFFOLDED × 0.5) / total_requirements × 100
+A 0–100 score computed from WRITTEN tests and their confidence scores:
+- +5 if all FLAGGED items are documented with `# quell: flagged`
+- -10 if any HIGH-confidence test is disabled with `@pytest.mark.skip`
 
-Tiers: 80-100 Production Ready / 60-79 Review Needed / 0-59 Needs Work
+Tiers: GREEN ≥80 / YELLOW ≥60 / RED <60
 
 ## All commands
 
 | Command | What it does |
 |---------|-------------|
-| `quell find [PATH]` | Scan for untested edge cases, show three-bucket output |
-| `quell find [PATH] --fix` | Also write WRITTEN tests to disk |
-| `quell find [PATH] --fix --auto` | Same, skip confirmation (CI mode) |
-| `quell score [PATH]` | Show PRS score and per-file breakdown |
-| `quell score [PATH] --badge` | Print SVG badge to stdout |
+| `quell find src/` | Scan for untested edge cases, show three-bucket output |
+| `quell find src/ --fix` | Also write WRITTEN tests to disk |
+| `quell find src/ --fix --auto` | Same, skip confirmation (CI mode) |
+| `quell find src/ --format github` | GitHub Actions annotation format |
+| `quell score` | Show PRS score from last scan |
+| `quell score --badge` | Print SVG badge to stdout |
 | `quell reproduce "<bug>"` | Convert bug description into a verified failing test |
-| `quell ci [PATH] --threshold N` | Exit non-zero if PRS is below threshold |
+| `quell ci` | Exit 1 if PRS is below threshold |
 | `quell init` | Add [tool.quell] to pyproject.toml |
-| `quell install github-action` | Write GitHub Actions workflow |
-| `quell auth set KEY=value` | Configure LLM provider key |
+| `quell install --action` | Write GitHub Actions workflow |
+| `quell auth set --provider groq --key sk-...` | Configure LLM provider |
 | `quell auth status` | Show current auth config |
-| `quell auth status --privacy` | Show exactly what gets transmitted |
 
 ## 5-gate pipeline
 
+Each candidate test passes 5 gates before being written:
+
 | Gate | Check |
 |------|-------|
-| Gate 1 | AST valid — parses to valid Python |
-| Gate 2 | Original — not already in any test file |
-| Gate 3 | Secure — no shell calls, no filesystem writes, no network |
-| Gate 4 | Passes Correct — test passes against original code |
-| Gate 5 | Fails Violated — test fails when the requirement is violated |
+| Gate 1 | AST valid, imports resolve |
+| Gate 2 | Originality — not a copy of an existing test |
+| Gate 3 | Security — no forbidden operations |
+| Gate 4 | Passes on correct code (proves the test is right) |
+| Gate 5 | Fails on violated code (proves the test catches bugs) |
+
+Only Gate 4+5 survivors become WRITTEN tests. Earlier failures become SCAFFOLDED stubs.
 
 ## Key facts
 
@@ -90,6 +107,8 @@ Tiers: 80-100 Production Ready / 60-79 Review Needed / 0-59 Needs Work
 - Python: 3.11+
 - Spec sources: Python docstrings, Pydantic v2 Field constraints, PySpark StructType, type annotations
 - Constraint kinds: MUST_RAISE, MUST_RETURN, BOUNDARY, ENUM_VALID, NOT_NULL, TYPE_CHECK
-- Rule engine: handles ~75% of cases with no network calls and no API key
-- Default LLM provider (opt-in): Groq (llama-3.3-70b-versatile)
+- LLM required: No (rule engine handles ~75%)
+- Default LLM provider: Groq (llama-3.3-70b-versatile) — fast, free tier available
 - Other LLM providers: Anthropic Claude, OpenAI GPT-4, Ollama
+- Scaffold dir: tests/scaffold/ (auto-gitignored by quell init)
+- Report file: quell-report.json (project root)

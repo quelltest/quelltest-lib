@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "quelltest"
-version = "2.0.0"
+version = "2.0.1"
 description = "Find untested edge cases in Python code. 5-gate verified test generation from docstrings, Pydantic models, and type annotations. Production Readiness Score."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -135,6 +135,11 @@ enable_docstring = true
 enable_types = true
 enable_mutations = false
 score_threshold = 0.0
+# v2.0.1 — cloud sync (spec8 §11.8); opt-in, never auto-sync
+sync = false
+sync_project_alias = ""
+sync_include_scaffolded = true
+sync_include_flagged_locations = true
 
 [dependency-groups]
 dev = [
