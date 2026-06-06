@@ -220,12 +220,9 @@ def cmd_find(
     _sys.stderr.write(
         "[quell] Running quell find (primary command from v2.0.0)\n"
     )
-    # `find` is a superset of `scan` — delegate to the scan implementation
-    # while tagging the source as the unified find command.
-    cmd_scan(
+    _run_find_impl(
         target=target,
         fix=fix,
-        suggest=False,
         llm=use_llm,
         no_llm=False,
         project_root=project_root,
@@ -233,28 +230,18 @@ def cmd_find(
     )
 
 
-@app.command("scan")
-def cmd_scan(
-    target: Path = typer.Argument(Path("."), help="File or directory to scan"),
-    fix: bool = typer.Option(False, "--fix", help="Generate failing tests for each gap"),
-    suggest: bool = typer.Option(False, "--suggest", help="Also suggest code fixes via LLM (requires --llm)"),
-    llm: bool = typer.Option(False, "--llm", help="Enable LLM for guard types the rule engine can't handle"),
-    no_llm: bool = typer.Option(False, "--no-llm", help="[deprecated] Rule-based only, no LLM (now the default)"),
-    project_root: Path = typer.Option(Path("."), "--root"),
-    fmt: str = typer.Option("console", "--format", "-f", help="Output format: console or github"),
-) -> None:
-    """
-    [deprecated] Use `quell find` instead. Will be removed in v2.2.
 
-    quell scan src/                   find all logic gaps
-    quell scan src/ --fix             generate failing tests (rule-based, no network)
-    quell scan src/ --fix --llm       also use LLM for complex guard types
-    """
-    import sys as _sys
-    _sys.stderr.write(
-        "[quell] DEPRECATED: `quell scan` has been renamed to `quell find`. "
-        "It will be removed in v2.2. Run `quell find` instead.\n"
-    )
+
+def _run_find_impl(
+    target: Path,
+    fix: bool = False,
+    suggest: bool = False,
+    llm: bool = False,
+    no_llm: bool = False,
+    project_root: Path = Path("."),
+    fmt: str = "console",
+) -> None:
+    """Shared implementation called by `quell find`."""
     # Fully synchronous — no asyncio.run() at the top level.
     # LLM calls inside use _run_coro() which isolates each await in its own thread.
     from quell.core.models import VerificationStatus
@@ -693,207 +680,26 @@ def _write_scan_report(
         )
 
 
-@app.command("check")
-def cmd_check(  # noqa: PLR0913
-    target: str = typer.Argument(".", help="File or directory to check"),
-    fix: bool = typer.Option(False, "--fix", help="Generate and write verified tests"),
-    no_llm: bool = typer.Option(
-        False, "--no-llm",
-        help="Disable all LLM calls. Rule-based only. No network. Default for CI.",
-    ),
-    sources: str | None = typer.Option(
-        None, "--sources", help="Comma-separated: docstring,type,mutation"
-    ),
-    fmt: str = typer.Option("console", "--format", "-f", help="Output format: console or json"),
-    project_root: Path = typer.Option(Path("."), "--root", help="Project root"),
-    with_containers: bool = typer.Option(
-        False, "--with-containers",
-        help="Auto-detect infra deps and spin up ephemeral containers",
-    ),
-    min_confidence: int = typer.Option(
-        50, "--min-confidence",
-        help="Only write tests at or above this confidence score (0-100)",
-        min=0, max=100,
-    ),
-    ci_confidence: int = typer.Option(
-        70, "--ci-confidence",
-        help="CI enforcement threshold — tests below this are review-only",
-        min=0, max=100,
-    ),
-    keep_containers: bool = typer.Option(
-        False, "--keep-containers",
-        help="Keep containers alive after the run (reused on next quell check)",
-    ),
-    show_why: bool = typer.Option(
-        False, "--show-why",
-        help="Print the dependency path explaining why each container is started",
-    ),
-    graph_rebuild: bool = typer.Option(
-        False, "--graph-rebuild",
-        help="Force a full QuellGraph rebuild before scanning",
-    ),
+
+
+@app.command('scan')
+def cmd_scan(
+    target: Path = typer.Argument(Path('.'), help='[removed] use quell find'),
 ) -> None:
-    """
-    [deprecated] Use `quell find` instead. Will be removed in v2.2.
-
-    Check requirement coverage from type annotations and docstrings.
-    """
-    import sys as _sys
-    _sys.stderr.write(
-        "[quell] DEPRECATED: `quell check` has been renamed to `quell find`. "
-        "It will be removed in v2.2. Run `quell find` instead.\n"
-    )
-    from quell.sdk import Quell
-
-    src_list = sources.split(",") if sources else ["docstring", "type"]
-    config = _load_config(project_root)
-    if no_llm:
-        config = config.model_copy(update={"llm_provider": "none"})
-
-    # QuellGraph: build or rebuild before scanning if requested
-    graph_db = project_root / ".quellgraph" / "graph.db"
-    if graph_rebuild or (with_containers and not graph_db.exists()):
-        from quell.graph.builder import QuellGraphBuilder
-        with console.status("[bold blue]Building QuellGraph...[/bold blue]"):
-            builder = QuellGraphBuilder(graph_db)
-            report = builder.build(project_root)
-            console.print(
-                f"[dim]QuellGraph: {report.total_files} files "
-                f"({report.reparsed} reparsed, "
-                f"{report.total_files - report.reparsed} cached)  "
-                f"{report.functions} functions  {report.classes} classes[/dim]"
-            )
-
-    # Container engine: spin up ephemeral containers when requested
-    container_engine = None
-    if with_containers:
-        from quell.infra.engine import ContainerEngine
-        container_engine = ContainerEngine(
-            lock_path=project_root / ".quellgraph" / "containers.lock"
-        )
-        if graph_db.exists():
-            from quell.graph.query import QuellGraph
-            try:
-                graph = QuellGraph(graph_db)
-                stats = graph.stats()
-                if stats.get("infra_dependent", 0) > 0:
-                    # Collect all infra tags across functions that need containers
-                    all_tags: set[str] = set()
-                    for fn in graph.list_functions():
-                        all_tags.update(graph.get_transitive_infra_tags(fn.id))
-
-                    if show_why and all_tags:
-                        console.print(
-                            f"[dim]Containers needed: {', '.join(sorted(all_tags))}[/dim]"
-                        )
-
-                    with console.status(
-                        f"[bold blue]Starting containers: {', '.join(sorted(all_tags))}...[/bold blue]"
-                    ):
-                        container_engine.prepare(all_tags)
-            except Exception as exc:
-                console.print(f"[yellow]QuellGraph unavailable: {exc}[/yellow]")
-
-    q = Quell(project_root=project_root)
-
-    with console.status("[bold blue]Scanning specifications...[/bold blue]"):
-        result = q.check(target, sources=src_list, fix=fix)
-
-    # Teardown containers unless --keep-containers was passed
-    if container_engine is not None and not keep_containers:
-        torn = container_engine.teardown()
-        if torn:
-            console.print(f"[dim]Containers stopped: {', '.join(torn)}[/dim]")
-
-    if fmt == "json":
-        gaps = [
-            {
-                "file": r.target_file.name,
-                "function": r.target_function,
-                "description": r.description,
-                "kind": r.constraint_kind.value,
-                "source": r.source.value,
-            }
-            for r in result.requirements if not r.is_covered
-        ]
-        output = {
-            "quell_version": __version__,
-            "target": target,
-            "total_requirements": len(result.requirements),
-            "covered": len(result.covered),
-            "gaps": gaps,
-            "score": result.score,
-        }
-        print(_json.dumps(output, indent=2))
-        return
-
-    table = Table(title=f"Requirements — {target}", show_header=True)
-    table.add_column("Function", style="cyan")
-    table.add_column("Kind", style="yellow")
-    table.add_column("Description")
-    table.add_column("Covered", style="green")
-    table.add_column("Method")
-
-    for req in result.requirements:
-        covered = "YES" if req.is_covered else "NO"
-        style = "green" if req.is_covered else "red"
-        tag = _method_tag(req.source.value)
-        table.add_row(
-            req.target_function,
-            req.constraint_kind.value,
-            req.description[:55] + ("..." if len(req.description) > 55 else ""),
-            f"[{style}]{covered}[/{style}]",
-            tag,
-        )
-
-    console.print(table)
-    console.print(
-        f"\n[bold]Score:[/bold] {result.score:.0%} "
-        f"({len(result.covered)}/{len(result.requirements)} covered)"
-    )
-
-    if result.uncovered:
-        console.print(
-            f"\n[yellow]{len(result.uncovered)} gap(s) found.[/yellow]"
-            + (" Run with --fix to generate tests." if not fix else "")
-        )
-
-    if fix and result.report_path:
-        console.print(
-            f"\n[bold]Diagnostic report:[/bold] {result.report_path}\n"
-            "[dim]Share this file with the Quell maintainer to improve "
-            "rule engine coverage. No source code is included.[/dim]"
-        )
-        # Check if any verified test was LLM-generated
-        llm_used = False
-        try:
-            rpt = _json.loads(result.report_path.read_text())
-            llm_used = any(
-                o.get("generated_by", "").startswith("llm")
-                for o in rpt.get("outcomes", [])
-                if o.get("outcome") == "verified"
-            )
-        except Exception:
-            pass
-        if not llm_used:
-            console.print("\n[dim]Your code never left your machine.[/dim]")
-        else:
-            console.print(
-                "\n[dim]LLM used for complex cases. "
-                "Only function signatures were sent — never business logic.[/dim]"
-            )
-
-    if not result.requirements:
-        console.print(
-            "\n[dim]No requirements found. Add docstrings with Raises:/Returns: "
-            "blocks or Pydantic Field constraints.[/dim]"
-        )
-        console.print(
-            "[dim]No API key needed for rule-based checks. "
-            "For LLM features: quell auth login[/dim]"
-        )
+    """`quell scan` was removed in v1.2. Use `quell find` instead."""
+    console.print('[red]Error:[/red] `quell scan` was removed in v1.2.')
+    console.print('  Use [bold]quell find[/bold] instead.')
+    raise typer.Exit(1)
 
 
+@app.command('check')
+def cmd_check(
+    target: str = typer.Argument('.', help='[removed] use quell find'),
+) -> None:
+    """`quell check` was removed in v1.2. Use `quell find` instead."""
+    console.print('[red]Error:[/red] `quell check` was removed in v1.2.')
+    console.print('  Use [bold]quell find[/bold] instead.')
+    raise typer.Exit(1)
 @app.command("reproduce")
 def cmd_reproduce(
     description: str = typer.Argument(..., help="Bug description in plain English"),
