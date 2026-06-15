@@ -32,6 +32,7 @@ ABSOLUTE RULES — never violate:
 from __future__ import annotations
 
 import ast as _ast
+import contextlib
 import os
 import re
 import shutil
@@ -47,6 +48,7 @@ from quell.core.models import (
     Requirement,
     VerificationResult,
     VerificationStatus,
+    SurvivedMutant,
 )
 from quell.infra.specs import _assert_no_credential_reads
 
@@ -91,21 +93,48 @@ def _resolve_pytest_cmd() -> list[str]:
 _PYTEST_CMD_CACHE: list[str] | None = None
 
 
-def _prepend_src_paths(env: dict[str, str], cwd: Path) -> None:
-    """Prepend local source trees to PYTHONPATH.
+def _prepend_src_paths(env: dict[str, str], cwd: Path, temp_run_dir: Path | None = None) -> None:
+    """Prepend local source trees and optional temp run dir to PYTHONPATH.
 
     When code lives in src/ (e.g. src/requests/adapters.py), the test
     subprocess must import from there — not from the installed site-packages
     copy — so that Quell's injected violation is actually visible to the test.
-    We prepend src/, lib/, and cwd itself; whichever exist win over site-packages.
+    We prepend temp_run_dir (if provided), src/, lib/, and cwd itself;
+    whichever exist win over site-packages.
     """
     sep = ";" if sys.platform == "win32" else ":"
-    extra = [
+    extra = []
+    if temp_run_dir:
+        extra.append(str(temp_run_dir))
+    extra.extend([
         str(p) for p in (cwd / "src", cwd / "lib", cwd)
         if p.is_dir()
-    ]
+    ])
     existing = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = sep.join(extra + ([existing] if existing else []))
+
+
+@contextlib.contextmanager
+def file_lock(lock_path: Path):
+    """Atomic directory-based file locking mechanism."""
+    lock_dir = Path(str(lock_path) + ".lock_dir")
+    acquired = False
+    start_time = time.time()
+    while not acquired:
+        try:
+            lock_dir.mkdir()
+            acquired = True
+        except FileExistsError:
+            if time.time() - start_time > 10:  # 10 seconds timeout
+                raise TimeoutError(f"Could not acquire lock on {lock_path}")
+            time.sleep(0.05)
+    try:
+        yield
+    finally:
+        try:
+            lock_dir.rmdir()
+        except OSError:
+            pass
 
 
 class Verifier:
@@ -123,16 +152,27 @@ class Verifier:
         """Run full two-phase verification. Always restores source in finally."""
         start = time.time()
         temp = self._write_temp(test)
-        bak = self._backup(req.target_file)
-
+        
+        # Create a run-specific temp directory for copy-on-write violation
+        run_temp_dir = self.backup_dir / f"run_{time.time_ns()}"
+        run_temp_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Determine relative path from project source root
+        cwd = self._resolve_cwd(req.target_file)
+        rel_dir = cwd
+        for p in (cwd / "src", cwd / "lib"):
+            if p.is_dir() and req.target_file.is_relative_to(p):
+                rel_dir = p
+                break
+        rel_path = req.target_file.relative_to(rel_dir)
+        temp_target_file = run_temp_dir / rel_path
+        
+        bak = None
         try:
             # Step 1: test must PASS on correct code
-            orig = self._pytest(temp, req.target_file)
+            # Run without prepended temp_run_dir so original workspace code is tested
+            orig = self._pytest(temp, req.target_file, temp_run_dir=None)
             if not orig["passed"]:
-                # pytest writes failure details to stdout in --tb=short mode;
-                # stderr is mostly empty unless the subprocess itself crashed.
-                # Capture both so the diagnostic surfaces the real reason
-                # (ImportError, missing env var, app startup failure, etc.).
                 combined = (orig.get("stdout", "") or "") + "\n" + (orig.get("stderr", "") or "")
                 return VerificationResult(
                     requirement_id=req.id, generated_test=test,
@@ -141,11 +181,31 @@ class Verifier:
                     duration_ms=self._ms(start),
                 )
 
-            # Step 2: inject violation
-            self._violate(req)
+            # Step 2: inject violation into copy
+            shutil.copy2(req.target_file, temp_target_file)
+            if req.constraint_kind == ConstraintKind.MUTATION:
+                # Mutation uses mutmut apply which operates in-place. Lock, backup, apply, copy, restore.
+                lock_path = req.target_file.with_suffix(req.target_file.suffix + ".lock")
+                with file_lock(lock_path):
+                    bak = self._backup(req.target_file)
+                    try:
+                        subprocess.run(
+                            ["mutmut", "apply", req.id],
+                            capture_output=True, timeout=10,
+                            cwd=req.target_file.parent,
+                        )
+                        shutil.copy2(req.target_file, temp_target_file)
+                    finally:
+                        self._restore(req.target_file, bak)
+                        bak = None
+            else:
+                # Run _violate on copy-on-write temp requirement
+                temp_req = req.model_copy(update={"target_file": temp_target_file})
+                self._violate(temp_req)
 
             # Step 3: test must FAIL on violated code
-            viol = self._pytest(temp, req.target_file)
+            # Prepends run_temp_dir to PYTHONPATH so pytest loads our violated copy
+            viol = self._pytest(temp, req.target_file, temp_run_dir=run_temp_dir)
             status = (
                 VerificationStatus.VERIFIED if not viol["passed"]
                 else VerificationStatus.DOESNT_CATCH_VIOLATION
@@ -170,20 +230,16 @@ class Verifier:
                 duration_ms=self._ms(start),
             )
         finally:
-            # ALWAYS restore — no exceptions to this rule
-            self._restore(req.target_file, bak)
+            if bak:
+                self._restore(req.target_file, bak)
             temp.unlink(missing_ok=True)
+            if run_temp_dir.exists():
+                shutil.rmtree(run_temp_dir, ignore_errors=True)
 
     def _write_temp(self, test: GeneratedTest) -> Path:
         d = self.backup_dir / "temp"
         d.mkdir(parents=True, exist_ok=True)
         f = d / f"quell_{test.requirement_id}.py"
-        # CRITICAL: utf-8 explicitly. On Windows, Path.write_text() defaults to
-        # cp1252; Python source is utf-8 (PEP 3120). Em-dashes in Quell
-        # descriptions become byte 0x97 in cp1252, which is invalid utf-8 — pytest
-        # then fails to parse the file and the test reports FAILS_ON_CORRECT for
-        # the wrong reason. This single line is the difference between
-        # verified=0 and verified>0 on Windows.
         f.write_text(test.test_code, encoding="utf-8")
         return f
 
@@ -194,9 +250,11 @@ class Verifier:
         return bak
 
     def _restore(self, src: Path, bak: Path) -> None:
-        if bak.exists():
+        try:
             shutil.copy2(bak, src)
             bak.unlink()
+        except FileNotFoundError:
+            pass
 
     def _violate(self, req: Requirement) -> None:
         """Modify source to break the requirement so a good test will fail."""
@@ -225,30 +283,17 @@ class Verifier:
             modified = _violate_must_return(src, req.target_function)
         elif req.constraint_kind == ConstraintKind.SILENT_FAIL:
             modified = _violate_silent_fail(src, req.target_function)
-        elif req.constraint_kind == ConstraintKind.MUTATION:
-            try:
-                subprocess.run(
-                    ["mutmut", "apply", req.id],
-                    capture_output=True, timeout=10,
-                    cwd=req.target_file.parent,
-                )
-            except Exception:
-                pass
-            return
         else:
             return
 
         req.target_file.write_text(modified, encoding="utf-8")
 
-    def _pytest(self, test_file: Path, src: Path) -> dict:  # type: ignore[type-arg]
+    def _pytest(self, test_file: Path, src: Path, temp_run_dir: Path | None = None) -> dict:  # type: ignore[type-arg]
         # Run from project root so all package imports resolve correctly.
         cwd = self._resolve_cwd(src)
         env = os.environ.copy()
         env.update(_load_dotenv(cwd))
-        _prepend_src_paths(env, cwd)
-        # Phase 2 isolation: tell generated fixtures to wrap DB calls in a
-        # transaction that rolls back, so Phase 1 and Phase 2 always start
-        # from the same database state (see quell/infra/engine.py).
+        _prepend_src_paths(env, cwd, temp_run_dir)
         env.setdefault("QUELL_TRANSACTION_ROLLBACK", "false")
         cmd = _resolve_pytest_cmd()
         try:
@@ -272,7 +317,6 @@ class Verifier:
         """Find the correct working directory for pytest subprocess."""
         if self._project_root and self._project_root.exists():
             return self._project_root
-        # Walk up to find pyproject.toml / setup.py
         markers = {"pyproject.toml", "setup.py", "setup.cfg"}
         current = src.parent
         while current != current.parent:
@@ -287,12 +331,6 @@ class Verifier:
 
 # ── env handling ─────────────────────────────────────────────────────────────
 
-# Files we try, in order of *lowest* to *highest* priority. Templates and
-# examples are loaded first so they fill in placeholder values for any var
-# the user hasn't set elsewhere; the real .env files override them.
-# Rationale: a template that says `MONGODB_URI=changeme` is enough to let
-# pydantic-settings instantiate at app import — better than KeyError, even
-# if the value can't actually connect anywhere.
 _DOTENV_CANDIDATES: tuple[str, ...] = (
     ".env.template",
     ".env.example",
@@ -307,13 +345,7 @@ _DOTENV_CANDIDATES: tuple[str, ...] = (
 
 
 def _load_dotenv(cwd: Path) -> dict[str, str]:
-    """Merge KEY=VALUE pairs from every dotenv-family file at `cwd`.
-
-    Later files in `_DOTENV_CANDIDATES` override earlier ones, so real
-    `.env` wins over `.env.example`. Minimal in-tree parser — no
-    python-dotenv dependency. Returns {} if nothing readable found.
-    Never raises.
-    """
+    """Merge KEY=VALUE pairs from every dotenv-family file at `cwd`."""
     merged: dict[str, str] = {}
     for name in _DOTENV_CANDIDATES:
         path = cwd / name
@@ -328,13 +360,11 @@ def _load_dotenv(cwd: Path) -> dict[str, str]:
 
 
 def _parse_dotenv(text: str) -> dict[str, str]:
-    """Parse one dotenv file's contents. Accepts KEY=VALUE, KEY="V", KEY='V'."""
     out: dict[str, str] = {}
     for raw in text.splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
-        # Allow `export FOO=bar` (some teams write .env this way)
         if line.startswith("export "):
             line = line[len("export "):].lstrip()
         key, _, value = line.partition("=")
@@ -342,7 +372,6 @@ def _parse_dotenv(text: str) -> dict[str, str]:
         if not key or not key.replace("_", "").isalnum():
             continue
         value = value.strip()
-        # Strip an inline comment that isn't inside quotes
         if value and value[0] not in ("'", '"'):
             hash_pos = value.find(" #")
             if hash_pos != -1:
@@ -356,12 +385,8 @@ def _parse_dotenv(text: str) -> dict[str, str]:
 
 
 # ── targeted violation helpers ────────────────────────────────────────────────
-# Each helper targets ONLY the lines inside the named function, not the whole
-# file. This prevents the verifier from accidentally violating a different
-# function when multiple functions share the same pattern.
 
 def _func_line_range(src: str, func_name: str) -> tuple[int, int] | None:
-    """Return (start_line, end_line) for func_name in src (1-indexed, inclusive)."""
     try:
         tree = _ast.parse(src)
     except SyntaxError:
@@ -382,28 +407,18 @@ def _violate_in_range(
     replacement: str,
     count: int = 1,
 ) -> str:
-    """Apply re.sub only within the lines of func_name."""
     rng = _func_line_range(src, func_name)
     if rng is None:
-        # Fallback: file-wide replacement (original behaviour)
         return re.sub(pattern, replacement, src, count=count)
 
     lines = src.splitlines(keepends=True)
-    start, end = rng[0] - 1, rng[1]  # convert to 0-indexed
+    start, end = rng[0] - 1, rng[1]
     func_block = "".join(lines[start:end])
     modified_block = re.sub(pattern, replacement, func_block, count=count)
     return "".join(lines[:start]) + modified_block + "".join(lines[end:])
 
 
 def _violate_must_raise(src: str, func_name: str) -> str:
-    """Replace every `raise X(...)` in func_name with `pass`.
-
-    AST-based — handles multi-line raises and never leaves an empty `if:` block.
-    Commenting out a raise (the old behaviour) produced IndentationError because
-    a bare comment doesn't satisfy Python's block requirement.
-    Replacing with `pass` keeps the syntax valid and breaks the guard so the
-    test's `pytest.raises(...)` no longer triggers.
-    """
     try:
         tree = _ast.parse(src)
     except SyntaxError:
@@ -425,8 +440,6 @@ def _violate_must_raise(src: str, func_name: str) -> str:
             end = (node.end_lineno or node.lineno) - 1
             spans.append((start, end))
         elif isinstance(node, _ast.Assert):
-            # `assert condition` raises AssertionError when False.
-            # Replace with pass so the CUSTOM guard violation is visible.
             start = node.lineno - 1
             end = (node.end_lineno or node.lineno) - 1
             spans.append((start, end))
@@ -453,12 +466,11 @@ def _violate_boundary(src: str, func_name: str) -> str:
     return _violate_in_range(
         src, func_name,
         r'((?:>|>=|<|<=)\s*)(\d+)',
-        lambda m: m.group(1) + "-9999",  # type: ignore[arg-type]
+        lambda m: m.group(1) + "-9999",
     )
 
 
 def _violate_must_return(src: str, func_name: str) -> str:
-    # Replace ALL non-None returns so early-return paths are also violated.
     return _violate_in_range(
         src, func_name,
         r'return (?!None\b)',
@@ -468,13 +480,28 @@ def _violate_must_return(src: str, func_name: str) -> str:
 
 
 def _violate_silent_fail(src: str, func_name: str) -> str:
-    # Change the first silent return to a raise so the gap test fails.
-    # Matches both `return None` and bare `return` (which also returns None implicitly).
-    # The lookahead (?=\s*(?:#[^\n]*)?\n|$) ensures we only match at end-of-line
-    # so we don't accidentally mangle `return something_else`.
     return _violate_in_range(
         src, func_name,
         r'\breturn(?:\s+None\b|\s*(?=#[^\n]*\n|\n|$))',
         'raise ValueError("quell_violation")',
         count=1,
     )
+
+
+class MutantVerifier(Verifier):
+    """Subclass of Verifier specifically for mutation testing verification."""
+
+    def verify(
+        self, mutant: SurvivedMutant, test: GeneratedTest
+    ) -> VerificationResult:
+        """Verify a test kills a mutant. Maps SurvivedMutant to a Requirement."""
+        from quell.core.models import Requirement, ConstraintKind, SpecSource
+        req = Requirement(
+            id=mutant.id,
+            description=f"Kill mutant {mutant.id}",
+            constraint_kind=ConstraintKind.MUTATION,
+            source=SpecSource.MUTATION,
+            target_function=mutant.function_name or "",
+            target_file=mutant.file_path,
+        )
+        return super().verify(req, test)
