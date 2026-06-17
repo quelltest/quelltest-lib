@@ -65,7 +65,7 @@ class Requirement(BaseModel):
 
 class GeneratedTest(BaseModel):
     """A candidate test generated for a Requirement."""
-    requirement_id: str
+    requirement_id: str | None = None
     test_function_name: str
     test_code: str
     test_file_path: Path
@@ -73,6 +73,12 @@ class GeneratedTest(BaseModel):
     generated_by: str  # "rule_engine" | "llm:model-name"
     unknown_types: list[str] = Field(default_factory=list)  # types rule engine couldn't stub
     confidence_score: int | None = None  # 0-100; None means not yet scored
+    mutant_id: str | None = None
+    operator: MutationOperator | None = None
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.requirement_id is None and self.mutant_id is not None:
+            self.requirement_id = self.mutant_id
 
     def meets_confidence(self, threshold: int = 50) -> bool:
         """Return True if the confidence score meets or exceeds the threshold."""
@@ -233,3 +239,37 @@ def confidence_tier_for(score: int) -> ConfidenceTier:
     if score >= 60:
         return ConfidenceTier.MEDIUM
     return ConfidenceTier.LOW
+
+
+class MutantSource(StrEnum):
+    MUTMUT   = "mutmut"
+    STRYKER  = "stryker"
+
+
+class MutationOperator(StrEnum):
+    BOUNDARY_SHIFT    = "boundary_shift"
+    ARITHMETIC_SWAP   = "arithmetic_swap"
+    LOGICAL_SWAP      = "logical_swap"
+    COMPARISON_FLIP   = "comparison_flip"
+    RETURN_MUTATION   = "return_mutation"
+    CONSTANT_MUTATION = "constant_mutation"
+    STRING_MUTATION   = "string_mutation"
+    STATEMENT_REMOVAL = "statement_removal"
+    UNKNOWN           = "unknown"
+
+
+class SurvivedMutant(BaseModel):
+    id: str
+    source: MutantSource
+    file_path: Path
+    line_start: int
+    line_end: int
+    original_code: str
+    mutated_code: str
+
+    # Enriched fields added during analysis
+    operator: MutationOperator | None = None
+    function_name: str | None = None
+    function_source: str | None = None
+    test_file_path: Path | None = None
+    existing_tests: list[str] = Field(default_factory=list)
