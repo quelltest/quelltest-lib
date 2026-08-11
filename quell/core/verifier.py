@@ -188,7 +188,8 @@ class Verifier:
         return f
 
     def _backup(self, src: Path) -> Path:
-        bak = self.backup_dir / f"{src.stem}_{int(time.time())}.bak"
+        import uuid
+        bak = self.backup_dir / f"{src.stem}_{uuid.uuid4().hex}.bak"
         shutil.copy2(src, bak)
         return bak
 

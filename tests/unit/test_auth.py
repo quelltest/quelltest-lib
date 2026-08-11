@@ -9,7 +9,6 @@ from unittest.mock import patch
 import pytest
 
 from quell.auth.oauth import (
-    CREDENTIALS_PATH,
     _pkce_pair,
     _save_credentials,
     get_valid_token,

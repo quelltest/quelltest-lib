@@ -9,7 +9,6 @@ import pytest
 
 from quell.graph.query import QuellGraph
 
-
 # ---------------------------------------------------------------------------
 # Helpers — build a minimal synthetic graph.db without the builder
 # ---------------------------------------------------------------------------

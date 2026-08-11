@@ -67,25 +67,50 @@ class DocstringReader:
 
     def _raises(self, doc: str, func: str, path: Path) -> list[Requirement]:
         reqs = []
-        # Match Google "Raises:\n    ExceptionType: condition" blocks
+        # Match Google "Raises:\n    ExceptionType: condition" blocks.
+        # The outer regex captures the entire indented block; we then collect
+        # continuation lines (indented further, no leading ExceptionType:) so
+        # that multi-line conditions are not silently dropped.
         for block in re.finditer(
-            r'Raises?:\s*\n((?:[ \t]+\w[\w.]*[^\n]*\n?)*)', doc, re.MULTILINE
+            r'Raises?:\s*\n((?:[ \t]+[^\n]+\n?)*)', doc, re.MULTILINE
         ):
-            for line in block.group(1).strip().splitlines():
-                line = line.strip()
-                if ':' not in line:
-                    continue
-                exc, _, cond = line.partition(':')
+            current_exc: str | None = None
+            current_cond_parts: list[str] = []
+            current_raw: str = ""
+
+            def _flush() -> None:
+                if current_exc is None:
+                    return
+                cond = " ".join(current_cond_parts).strip()
                 reqs.append(Requirement(
                     id=str(uuid.uuid4())[:8],
-                    description=f"raises {exc.strip()} when {cond.strip()}",
+                    description=f"raises {current_exc} when {cond}",
                     constraint_kind=ConstraintKind.MUST_RAISE,
                     source=SpecSource.DOCSTRING,
                     target_function=func,
                     target_file=path,
-                    expected_behavior=f"raises {exc.strip()}",
-                    raw_spec_text=line,
+                    expected_behavior=f"raises {current_exc}",
+                    raw_spec_text=current_raw,
                 ))
+
+            for raw_line in block.group(1).splitlines():
+                stripped = raw_line.strip()
+                if not stripped:
+                    continue
+                # An exception entry starts with "ExceptionType: ..."
+                if re.match(r'\w[\w.]*\s*:', stripped):
+                    _flush()
+                    current_exc = None
+                    current_cond_parts = []
+                    exc, _, cond_start = stripped.partition(':')
+                    current_exc = exc.strip()
+                    current_raw = stripped
+                    if cond_start.strip():
+                        current_cond_parts.append(cond_start.strip())
+                elif current_exc is not None:
+                    # Continuation line — append to the condition description
+                    current_cond_parts.append(stripped)
+            _flush()
         return reqs
 
     def _boundaries(self, doc: str, func: str, path: Path) -> list[Requirement]:

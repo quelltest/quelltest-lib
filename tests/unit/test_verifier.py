@@ -157,3 +157,23 @@ class TestVerifyFull:
         )
         result = verifier.verify(req, test)
         assert result.status == VerificationStatus.FAILS_ON_CORRECT
+
+
+class TestBackupFilenameCollision:
+    """Regression tests for issue #3 — backup filename collision."""
+
+    def test_backup_names_are_unique(self, tmp_path: Path, default_config: QuellConfig) -> None:
+        v = Verifier(default_config, project_root=tmp_path)
+        src = tmp_path / "payments.py"
+        src.write_text("def foo(): pass\n")
+        names = {v._backup(src).name for _ in range(5)}
+        assert len(names) == 5, "backup filenames must be unique across concurrent calls"
+
+    def test_backup_uses_hex_not_timestamp(self, tmp_path: Path, default_config: QuellConfig) -> None:
+        v = Verifier(default_config, project_root=tmp_path)
+        src = tmp_path / "payments.py"
+        src.write_text("def foo(): pass\n")
+        bak = v._backup(src)
+        # uuid4 hex is 32 hex chars; a unix timestamp has at most 10 digits
+        suffix = bak.stem.split("_")[-1]
+        assert len(suffix) == 32, f"expected 32-char uuid hex, got: {suffix!r}"
