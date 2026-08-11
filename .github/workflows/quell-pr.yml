@@ -1,14 +1,29 @@
 name: Quell PR Report
 
+# SECURITY: this workflow executes pull request code, including code from
+# forks. It therefore runs on `pull_request` (NOT `pull_request_target`),
+# which gives it a read-only token, no secrets, and no access to the base
+# repository's cache scope.
+#
+# It previously used `pull_request_target` while checking out
+# `github.event.pull_request.head.sha` and exposing `secrets.QUELL_API_KEY`.
+# That is the "pwn request" pattern: any fork could open a PR whose code
+# exfiltrates the secret and uses the write-scoped token. actions/checkout
+# now refuses that combination outright, which is what surfaced this.
+#
+# Do NOT "fix" a checkout failure here with `allow-unsafe-pr-checkout: true`
+# — that reinstates the vulnerability. Posting the PR comment needs write
+# access, so it is split into quell-pr-comment.yml, which runs from the base
+# repository via workflow_run and never checks out PR code.
+
 on:
-  pull_request_target:
+  pull_request:
     types: [opened, synchronize, reopened]
     paths:
       - "quell/**/*.py"
 
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
   quell-report:
@@ -16,10 +31,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout PR head
+      - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
       - name: Install uv
@@ -28,78 +42,23 @@ jobs:
       - name: Install Quell
         run: uv sync
 
+      # `quell check` was removed in v1.2 and now exits 1; `quell find` is a
+      # superset of it. The rule engine is the default — no LLM, no network,
+      # so this job needs no API key at all.
       - name: Run Quell on changed files
-        id: quell
-        env:
-          QUELL_API_KEY: ${{ secrets.QUELL_API_KEY }}
+        run: uv run quell find quell/ || true
+
+      # quell find always writes quell-report.json to the project root.
+      - name: Stage report for the comment workflow
         run: |
-          uv run quell check quell/ --no-llm --format json > quell_report.json || true
-          echo "done=true" >> $GITHUB_OUTPUT
+          echo "${{ github.event.pull_request.number }}" > pr_number.txt
+          test -f quell-report.json || echo '{}' > quell-report.json
 
-      - name: Post PR comment
-        if: steps.quell.outputs.done == 'true'
-        uses: actions/github-script@v7
+      - name: Upload report
+        uses: actions/upload-artifact@v4
         with:
-          script: |
-            const fs = require('fs');
-            let report;
-            try {
-              report = JSON.parse(fs.readFileSync('quell_report.json', 'utf8'));
-            } catch(e) {
-              console.log('No report generated');
-              return;
-            }
-
-            const total = report.total_requirements || 0;
-            if (total === 0) return;
-
-            const gaps = report.gaps || [];
-            const score = report.score || 0;
-            const scoreEmoji = score >= 0.8 ? '🟢' : score >= 0.5 ? '🟡' : '🔴';
-            const pct = Math.round(score * 100);
-
-            let body = `## ${scoreEmoji} Quell Report\n\n`;
-            body += `**Requirement coverage for changed files: ${pct}%**\n\n`;
-
-            if (gaps.length === 0) {
-              body += `✅ All ${total} requirements in changed files are tested.\n\n`;
-            } else {
-              body += `Found **${gaps.length} untested requirement${gaps.length > 1 ? 's' : ''}:**\n\n`;
-              body += `| File | Function | Requirement | Type |\n`;
-              body += `|------|----------|-------------|------|\n`;
-              for (const g of gaps.slice(0, 10)) {
-                body += `| \`${g.file}\` | \`${g.function}\` | ${g.description} | ${g.kind} |\n`;
-              }
-              if (gaps.length > 10) {
-                body += `\n_...and ${gaps.length - 10} more. Run \`quell check --fix\` locally._\n`;
-              }
-              body += `\n**Fix locally:** \`quell check quell/ --fix\`\n`;
-            }
-
-            body += `\n<sub>Quell v${report.quell_version || 'dev'} • `;
-            body += `rule-based, no code sent anywhere • `;
-            body += `[quell.buildsbyshashank.tech](https://quell.buildsbyshashank.tech)</sub>`;
-
-            const { data: comments } = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-            });
-
-            const existing = comments.find(c => c.body.includes('Quell Report'));
-
-            if (existing) {
-              await github.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: existing.id,
-                body,
-              });
-            } else {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                body,
-              });
-            }
+          name: quell-report
+          path: |
+            quell-report.json
+            pr_number.txt
+          retention-days: 1
