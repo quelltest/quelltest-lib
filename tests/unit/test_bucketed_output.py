@@ -93,11 +93,24 @@ class TestPRSMixed:
         assert prs.flagged_count == 1
         assert prs.total_edge_cases == 6
 
-    def test_coverage_pct_includes_scaffolded(self) -> None:
+    def test_coverage_pct_excludes_scaffolded(self) -> None:
+        """spec10 §4.1: a SCAFFOLDED stub is not coverage.
+
+        Pre-spec10 this counted scaffolded stubs toward coverage, inflating the
+        number with tests that have no assertions yet. Only edge cases actually
+        exercised by a test — pre-existing or Gate-5-verified — count now.
+        """
         results = [_written("r1"), _scaffolded("r2"), _flagged("r3")]
         prs = compute_prs(results)
-        # (1 written + 1 scaffolded) / 3 total = 66.67%
-        assert abs(prs.edge_case_coverage_pct - 66.67) < 0.1
+        # 1 written / 3 total = 33.3%; the scaffolded stub asserts nothing.
+        assert abs(prs.edge_case_coverage_pct - 33.33) < 0.1
+
+    def test_coverage_pct_counts_pre_existing_tests(self) -> None:
+        """Hand-written tests count identically to ones quelltest wrote."""
+        results = [_written("r1"), _flagged("r2")]
+        prs = compute_prs(results, covered_count=2)
+        # (2 pre-existing + 1 written) / 4 total = 75%
+        assert abs(prs.edge_case_coverage_pct - 75.0) < 0.1
 
     def test_avg_confidence_only_counts_written(self) -> None:
         results = [_written("r1", 80), _written("r2", 60), _scaffolded("r3"), _flagged("r4")]
@@ -114,10 +127,17 @@ class TestPRSMixed:
 
 
 class TestPRSEmpty:
-    def test_empty_results_returns_zero(self) -> None:
+    def test_empty_results_is_unscored_not_failing(self) -> None:
+        """spec10 non-negotiable #4: zero findings is a GOOD outcome.
+
+        Pre-spec10 this returned tier="red" / "Edge Cases Uncovered", so
+        "I found nothing to complain about" rendered identically to "your code
+        is completely uncovered".
+        """
         prs = compute_prs([])
-        assert prs.score == 0
-        assert prs.tier == "red"
+        assert prs.scored is False
+        assert prs.tier == "gray"
+        assert prs.tier_label == "No edge cases found"
         assert prs.total_edge_cases == 0
 
 

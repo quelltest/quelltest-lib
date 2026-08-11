@@ -47,6 +47,24 @@ app.add_typer(sync_app, name="sync")
 
 console = Console()
 
+
+def _safe_glyph(preferred: str, fallback: str) -> str:
+    """Return `preferred` only if the active stdout encoding can render it.
+
+    Windows consoles default to cp1252, which cannot encode the tier emoji and
+    raises UnicodeEncodeError mid-render — crashing the command instead of
+    printing the score. Falls back to ASCII markers there.
+    """
+    import sys
+
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        preferred.encode(encoding)
+    except (UnicodeEncodeError, LookupError):
+        return fallback
+    return preferred
+
+
 # GitHub Actions workflow template — written by `quell install --action`
 GITHUB_ACTION_YAML = """\
 name: Quell — Edge Case Scanner
@@ -847,7 +865,16 @@ def cmd_score(
                         flag_reason=flag_reason,
                         gates_passed=0,
                     ))
-                prs = compute_prs(results)
+                # Edge cases already covered by the project's own tests. Without
+                # this the cached-report path reproduces the spec10 §0 bug:
+                # zero quelltest-written tests ⇒ 0/100 on a well-tested repo.
+                cached_covered = int(
+                    data.get("already_covered")
+                    or data.get("summary", {}).get("total_requirements", 0)
+                    - data.get("summary", {}).get("gaps_found", 0)
+                    or 0
+                )
+                prs = compute_prs(results, covered_count=max(0, cached_covered))
         except Exception:
             prs = None
 
@@ -873,6 +900,7 @@ def cmd_score(
             all_reqs.extend(reader.read(f))
         checked = checker.check(all_reqs)
         gaps = [r for r in checked if not r.is_covered]
+        covered_count = len(checked) - len(gaps)
 
         scan_results: list[BucketedResult] = []
         for req in gaps:
@@ -890,7 +918,13 @@ def cmd_score(
                     bucket=OutputBucket.SCAFFOLDED,
                     gates_passed=3,
                 ))
-        prs = _compute_prs(scan_results)
+        # covered_count is what makes this a property of the codebase rather
+        # than of quelltest's own output (spec10 §4.1). Hand-written tests count.
+        prs = _compute_prs(
+            scan_results,
+            covered_count=covered_count,
+            coverage_known=checker.has_test_suite,
+        )
 
     if json_out:
         import json as _json2
@@ -903,13 +937,31 @@ def cmd_score(
         print(svg)
         return
 
-    tier_color = {"green": "green", "yellow": "yellow", "red": "red"}.get(prs.tier, "white")
-    tier_emoji = {"green": "🟢", "yellow": "🟡", "red": "🔴"}.get(prs.tier, "")
+    tier_color = {
+        "green": "green", "yellow": "yellow", "red": "red", "gray": "bright_black",
+    }.get(prs.tier, "white")
+    tier_emoji = _safe_glyph(
+        {"green": "🟢", "yellow": "🟡", "red": "🔴", "gray": "⚪"}.get(prs.tier, ""),
+        {"green": "[OK]", "yellow": "[!]", "red": "[X]", "gray": "[-]"}.get(prs.tier, ""),
+    )
+
+    # spec10 non-negotiable #2: never print a number we cannot defend. A false
+    # 0/100 on a well-tested codebase is what lost us a user.
+    if not prs.scored:
+        console.print(Panel.fit(
+            f"[bold][{tier_color}]not scored[/{tier_color}][/bold]  "
+            f"{tier_emoji} [{tier_color}]{prs.tier_label}[/{tier_color}]\n\n"
+            "  [dim]No score is reported because there is nothing to compute it\n"
+            "  from — this is not a finding about your code.[/dim]",
+            title="quell score",
+        ))
+        return
 
     console.print(Panel.fit(
         f"[bold]PRS  [{tier_color}]{prs.score}/100[/{tier_color}][/bold]  "
         f"{tier_emoji} [{tier_color}]{prs.tier_label}[/{tier_color}]\n\n"
         f"  Edge case coverage : {prs.edge_case_coverage_pct:.0f}%\n"
+        f"  Covered by existing: {prs.covered_count}\n"
         f"  WRITTEN            : {prs.written_count}\n"
         f"  SCAFFOLDED         : {prs.scaffolded_count}\n"
         f"  FLAGGED            : {prs.flagged_count}\n"
