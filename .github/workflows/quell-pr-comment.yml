@@ -1,0 +1,126 @@
+name: Quell PR Comment
+
+# Posts the report produced by quell-pr.yml.
+#
+# SECURITY: this workflow holds `pull-requests: write`, so it must never
+# execute pull request code. It does not check out the repository at all —
+# it only downloads the artifact from the triggering run and renders it as
+# text. Every string in that artifact originates from the PR author's code
+# and is treated as untrusted input: sanitized and truncated before it is
+# interpolated into markdown, never evaluated.
+
+on:
+  workflow_run:
+    workflows: ["Quell PR Report"]
+    types: [completed]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  comment:
+    name: Post Quell report
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.event == 'pull_request'
+
+    steps:
+      - name: Download report
+        id: download
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: quell-report
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Post PR comment
+        if: steps.download.outcome == 'success'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+
+            let report, prNumber;
+            try {
+              report = JSON.parse(fs.readFileSync('quell-report.json', 'utf8'));
+              prNumber = parseInt(fs.readFileSync('pr_number.txt', 'utf8').trim(), 10);
+            } catch (e) {
+              core.info('No usable report artifact; nothing to post.');
+              return;
+            }
+            if (!Number.isInteger(prNumber) || prNumber <= 0) {
+              core.info('No valid PR number in artifact.');
+              return;
+            }
+
+            // Untrusted: authored by the PR's code. Never render raw.
+            const clean = (v, max = 60) =>
+              String(v ?? '')
+                .replace(/[\r\n|`<>]/g, ' ')
+                .trim()
+                .slice(0, max);
+
+            const summary = report.summary || {};
+            const total = Number(summary.total_requirements) || 0;
+            if (total === 0) {
+              core.info('No requirements found in changed files.');
+              return;
+            }
+
+            const gapCount = Number(summary.gaps_found) || 0;
+            const covered = Math.max(0, total - gapCount);
+            const pct = Math.round((covered / total) * 100);
+            const emoji = pct >= 80 ? '🟢' : pct >= 50 ? '🟡' : '🔴';
+
+            let body = `## ${emoji} Quell Report\n\n`;
+            body += `**Requirement coverage for changed files: ${pct}%** `;
+            body += `(${covered} of ${total} covered)\n\n`;
+
+            const gaps = Array.isArray(report.results) ? report.results : [];
+
+            if (gapCount === 0 || gaps.length === 0) {
+              body += `✅ All ${total} requirements in changed files are tested.\n`;
+            } else {
+              body += `Found **${gapCount} untested requirement${gapCount > 1 ? 's' : ''}:**\n\n`;
+              body += `| File | Function | Guard | Type |\n`;
+              body += `|------|----------|-------|------|\n`;
+              for (const g of gaps.slice(0, 10)) {
+                body += `| \`${clean(g.file, 80)}:${clean(g.line, 6)}\` `;
+                body += `| \`${clean(g.function, 40)}\` `;
+                body += `| \`${clean(g.guard, 60)}\` `;
+                body += `| ${clean(g.type, 20)} |\n`;
+              }
+              if (gaps.length > 10) {
+                body += `\n_...and ${gaps.length - 10} more._\n`;
+              }
+              body += `\n**Reproduce locally:** \`quell find quell/\`\n`;
+            }
+
+            body += `\n<sub>Quell v${clean(report.quell_version, 20) || 'dev'} • `;
+            body += `rule-based, no code sent anywhere • `;
+            body += `[quelltest.com](https://quelltest.com)</sub>`;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+            });
+            const existing = comments.find(
+              c => c.user.type === 'Bot' && c.body.includes('Quell Report')
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                body,
+              });
+            }

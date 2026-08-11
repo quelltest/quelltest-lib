@@ -238,31 +238,18 @@ class TestTeardown:
 
 
 class TestCheckNewFlags:
-    def test_check_accepts_min_confidence(self, tmp_path):
-        # Should not error on unrecognized option
-        (tmp_path / "src").mkdir()
-        result = runner.invoke(app, [
-            "check", str(tmp_path / "src"),
-            "--min-confidence", "70",
-            "--root", str(tmp_path),
-        ])
-        # Not checking exit code (SDK may fail without config) — just no OptionError
-        assert "--min-confidence" not in result.output or "No such option" not in result.output
+    """quell check was removed in v1.2 — these verify it hard-errors correctly."""
 
-    def test_check_accepts_graph_rebuild_flag(self, tmp_path):
-        (tmp_path / "src").mkdir()
-        result = runner.invoke(app, [
-            "check", str(tmp_path / "src"),
-            "--graph-rebuild",
-            "--root", str(tmp_path),
-        ])
-        assert "No such option" not in result.output
+    def test_check_exits_with_error(self, tmp_path):
+        result = runner.invoke(app, ["check", str(tmp_path)])
+        assert result.exit_code == 1
+        assert "removed in v1.2" in result.output
 
-    def test_check_accepts_keep_containers_flag(self, tmp_path):
-        (tmp_path / "src").mkdir()
-        result = runner.invoke(app, [
-            "check", str(tmp_path / "src"),
-            "--keep-containers",
-            "--root", str(tmp_path),
-        ])
-        assert "No such option" not in result.output
+    def test_check_recommends_find(self, tmp_path):
+        result = runner.invoke(app, ["check", str(tmp_path)])
+        assert "quell find" in result.output
+
+    def test_check_accepts_no_options(self, tmp_path):
+        # Stub accepts only [TARGET] — any old flag causes a usage error, which is fine
+        result = runner.invoke(app, ["check"])
+        assert result.exit_code == 1

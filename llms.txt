@@ -68,18 +68,25 @@ Tiers: GREEN ≥80 / YELLOW ≥60 / RED <60
 
 | Command | What it does |
 |---------|-------------|
-| `quell find src/` | Scan for untested edge cases, show three-bucket output |
-| `quell find src/ --fix` | Also write WRITTEN tests to disk |
-| `quell find src/ --fix --auto` | Same, skip confirmation (CI mode) |
-| `quell find src/ --format github` | GitHub Actions annotation format |
-| `quell score` | Show PRS score from last scan |
-| `quell score --badge` | Print SVG badge to stdout |
+| `quell find [PATH]` | Scan for untested edge cases, show three-bucket output |
+| `quell find [PATH] --fix` | Also write WRITTEN tests to disk |
+| `quell find [PATH] --fix --auto` | Same, skip confirmation (CI mode) |
+| `quell find [PATH] --format github` | GitHub Actions annotation format |
+| `quell score [PATH]` | Show PRS score and per-file breakdown |
+| `quell score [PATH] --badge` | Print SVG badge to stdout |
 | `quell reproduce "<bug>"` | Convert bug description into a verified failing test |
-| `quell ci` | Exit 1 if PRS is below threshold |
+| `quell prove [PATH]` | Coverage ratio for one file, optionally one function |
+| `quell ci [PATH] --threshold N` | Exit 1 if score is below threshold |
 | `quell init` | Add [tool.quell] to pyproject.toml |
-| `quell install --action` | Write GitHub Actions workflow |
+| `quell install` | Add both the pre-commit hook and the GitHub Actions workflow |
+| `quell install --hook` | Add only the pre-commit hook |
+| `quell install --pr` | Add only the GitHub Actions PR workflow |
 | `quell auth set --provider groq --key sk-...` | Configure LLM provider |
 | `quell auth status` | Show current auth config |
+| `quell auth status --privacy` | Show exactly what leaves your machine |
+
+Removed in v1.2: `quell scan` and `quell check`. Both now exit 1 with a
+pointer to `quell find`, which is a superset of each.
 
 ## 5-gate pipeline
 
@@ -107,8 +114,8 @@ Only Gate 4+5 survivors become WRITTEN tests. Earlier failures become SCAFFOLDED
 - Python: 3.11+
 - Spec sources: Python docstrings, Pydantic v2 Field constraints, PySpark StructType, type annotations
 - Constraint kinds: MUST_RAISE, MUST_RETURN, BOUNDARY, ENUM_VALID, NOT_NULL, TYPE_CHECK
-- LLM required: No (rule engine handles ~75%)
-- Default LLM provider: Groq (llama-3.3-70b-versatile) — fast, free tier available
+- LLM required: No — the rule engine handles ~75% of cases with no network calls and no API key
+- Default LLM provider (opt-in): Groq (llama-3.3-70b-versatile) — fast, free tier available
 - Other LLM providers: Anthropic Claude, OpenAI GPT-4, Ollama
 - Scaffold dir: tests/scaffold/ (auto-gitignored by quell init)
 - Report file: quell-report.json (project root)
