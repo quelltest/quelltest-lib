@@ -175,9 +175,38 @@ class Verifier:
             temp.unlink(missing_ok=True)
 
     def _write_temp(self, test: GeneratedTest) -> Path:
-        d = self.backup_dir / "temp"
-        d.mkdir(parents=True, exist_ok=True)
-        f = d / f"quell_{test.requirement_id}.py"
+        """Write the candidate test where it will actually live.
+
+        It used to go to `backup_dir/temp/`, outside the project's test tree.
+        pytest resolves conftest.py by walking up from the test file, so no
+        project fixture was ever in scope: a generated test requesting the
+        project's own `db_session` failed Gate 4 with "fixture 'db_session' not
+        found" and was discarded. Measured on an async/ORM fixture project, that
+        was 0 of 4 candidates — every fixture the generator resolved was
+        unusable at verification time (issue #159).
+
+        Writing into the destination directory means conftest resolution,
+        `testpaths`, and plugin config all apply exactly as they will for the
+        final test, so Gate 4 tests what will actually ship.
+
+        The file is removed in verify()'s finally block, as before.
+        """
+        import uuid
+
+        d = test.test_file_path.parent if test.test_file_path else self.backup_dir / "temp"
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            # Unwritable destination — fall back rather than fail generation.
+            d = self.backup_dir / "temp"
+            d.mkdir(parents=True, exist_ok=True)
+
+        # Must start with `test_` to satisfy pytest's default python_files
+        # pattern — an explicit path argument would be collected anyway, but
+        # matching the pattern keeps this working if collection is ever changed
+        # to run the directory. The uuid means we can never collide with, or
+        # overwrite, a real test file already in that directory.
+        f = d / f"test__quell_tmp_{uuid.uuid4().hex}.py"
         # CRITICAL: utf-8 explicitly. On Windows, Path.write_text() defaults to
         # cp1252; Python source is utf-8 (PEP 3120). Em-dashes in Quell
         # descriptions become byte 0x97 in cp1252, which is invalid utf-8 — pytest
