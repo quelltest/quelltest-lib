@@ -67,6 +67,40 @@ class RuleEngine:
         }
 
     def generate(self, req: Requirement) -> GeneratedTest | None:
+        """Generate a test, then adapt it to the project's async test style.
+
+        The async rewrite is applied here, at the single dispatch point, rather
+        than in each of the eight per-kind generators — they all emit the same
+        `asyncio.run(...)` shape, so one post-pass covers every kind and cannot
+        drift out of sync with a new one.
+        """
+        test = self._generate_for_kind(req)
+        if test is None:
+            return None
+        return self._apply_async_style(test, req)
+
+    def _apply_async_style(self, test: GeneratedTest, req: Requirement) -> GeneratedTest:
+        """Rewrite asyncio.run(...) into a native async test where supported.
+
+        Without this, #143's fixture reuse is inert on the async codebases it
+        was built for: asyncio.run opens a fresh event loop, so an async
+        `db_session` fixture is either never awaited or bound to a different
+        loop than the object under test.
+        """
+        if self._project_root is None or not self._is_async(req):
+            return test
+        try:
+            from quell.synthesis import async_style
+
+            style = async_style.detect(self._project_root)
+            rewritten = async_style.to_async_test(test.test_code, style)
+        except Exception:  # noqa: BLE001 — never fail generation over styling
+            return test
+        if rewritten == test.test_code:
+            return test
+        return test.model_copy(update={"test_code": rewritten})
+
+    def _generate_for_kind(self, req: Requirement) -> GeneratedTest | None:
         if self._all_required_unknown(req):
             return None  # all required params are complex objects → no useful stub
         if req.constraint_kind == ConstraintKind.MUST_RAISE:
