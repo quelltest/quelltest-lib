@@ -1,0 +1,8 @@
+[project]
+name = "async-orm-fixture"
+version = "0.1.0"
+dependencies = ["sqlalchemy", "pytest-asyncio"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
