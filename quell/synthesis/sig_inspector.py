@@ -189,12 +189,22 @@ def find_project_root(source_file: Path) -> Path:
     return source_file.parent
 
 
-def stub_for_call(sig: FuncSignature) -> tuple[str, list[str], list[str]]:
+def stub_for_call(
+    sig: FuncSignature,
+    project_fixtures: dict[str, object] | None = None,
+) -> tuple[str, list[str], list[str]]:
     """Build call argument string for required parameters.
+
+    Args:
+        sig: the signature to build a call for.
+        project_fixtures: {name: FixtureInfo} from fixture_locator.find_fixtures.
+            When a parameter matches one, the test requests that fixture instead
+            of a literal stub — the project's real object beats our guess every
+            time (spec10 §4.4 rung 1, issue #143).
 
     Returns:
         args_str      -- e.g. 'file_path=tmp_path / "x.py", count=1'
-        fixtures      -- pytest fixture names needed, e.g. ['tmp_path']
+        fixtures      -- pytest fixture names needed, e.g. ['tmp_path', 'db_session']
         unknown_types -- annotation strings the inspector couldn't stub
     """
     args: list[str] = []
@@ -202,12 +212,34 @@ def stub_for_call(sig: FuncSignature) -> tuple[str, list[str], list[str]]:
     unknown: list[str] = []
 
     for p in sig.required_params:
+        resolved = _resolve_fixture(p, project_fixtures)
+        if resolved is not None:
+            # Pass the fixture straight through as the argument value.
+            args.append(f"{p.name}={resolved}")
+            fixtures.append(resolved)
+            continue
+
         stub, fix, unk = _stub_param(p)
         args.append(f"{p.name}={stub}")
         fixtures.extend(fix)
         unknown.extend(unk)
 
     return ", ".join(args), list(dict.fromkeys(fixtures)), unknown
+
+
+def _resolve_fixture(
+    p: ParamInfo,
+    project_fixtures: dict[str, object] | None,
+) -> str | None:
+    """Return a project fixture name satisfying this parameter, or None."""
+    if not project_fixtures:
+        return None
+    try:
+        from quell.synthesis import fixture_locator
+
+        return fixture_locator.resolve(p.name, p.annotation, project_fixtures)  # type: ignore[arg-type]
+    except Exception:  # noqa: BLE001 — invariant #6: never raise out of a reader
+        return None
 
 
 # ── internals ────────────────────────────────────────────────────────────────

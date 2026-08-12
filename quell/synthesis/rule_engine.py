@@ -26,6 +26,31 @@ from quell.synthesis import sig_inspector
 class RuleEngine:
     """Deterministic rule-based test generator. No LLM required."""
 
+    def __init__(self, project_root: Path | None = None):
+        # The project's own conftest fixtures. Reusing a real `db_session` beats
+        # any literal we could invent for an AsyncSession (spec10 §4.4, #143).
+        # Discovered once per engine; find_fixtures is itself cached.
+        self._project_root = project_root
+        self._fixtures: dict[str, object] | None = None
+
+    def _project_fixtures(self, req: Requirement) -> dict[str, object]:
+        """Fixtures from the caller-supplied project root, or none.
+
+        Deliberately NOT inferred from req.target_file. Inferring walks up
+        looking for pyproject/.git markers and, for a source file in a temp
+        directory, lands on whatever shared parent happens to be above it —
+        discovering an unrelated project's conftest and injecting fixtures that
+        do not exist where the test will run. Callers know their root; they
+        pass it. No root means literal stubs, exactly as before this change.
+        """
+        if self._project_root is None:
+            return {}
+        if self._fixtures is None:
+            from quell.synthesis import fixture_locator
+
+            self._fixtures = dict(fixture_locator.find_fixtures(self._project_root))
+        return self._fixtures
+
     def can_handle(self, req: Requirement) -> bool:
         return req.constraint_kind in {
             ConstraintKind.MUST_RAISE,
@@ -101,7 +126,8 @@ class RuleEngine:
             call = f"{func}()"
             return call, "()", fixtures, [f"sig_not_found:{func}"]
 
-        call_args, fixtures, unknown = sig_inspector.stub_for_call(sig)
+        project_fixtures = self._project_fixtures(req)
+        call_args, fixtures, unknown = sig_inspector.stub_for_call(sig, project_fixtures)
 
         if sig.is_method and sig.class_name:
             if sig.is_classmethod:
@@ -112,7 +138,9 @@ class RuleEngine:
                 # Inspect __init__ to build instantiation
                 init_sig = sig_inspector.inspect_init(sig.class_name, req.target_file)
                 if init_sig is not None and init_sig.required_params:
-                    init_args, init_fix, init_unk = sig_inspector.stub_for_call(init_sig)
+                    init_args, init_fix, init_unk = sig_inspector.stub_for_call(
+                        init_sig, project_fixtures
+                    )
                     fixtures.extend(init_fix)
                     unknown.extend(init_unk)
                     inst = f"{sig.class_name}({init_args})"
@@ -142,7 +170,11 @@ class RuleEngine:
         sig = sig_inspector.inspect(req.target_function, req.target_file)
         if sig is None or not sig.required_params:
             return False
-        _, _, unknown = sig_inspector.stub_for_call(sig)
+        # Must pass the project's fixtures here too. Without them this gate
+        # still sees every complex param as unknown and skips functions whose
+        # arguments a conftest fixture can now supply — which would leave #143
+        # implemented but inert.
+        _, _, unknown = sig_inspector.stub_for_call(sig, self._project_fixtures(req))
         # If every required param is unknown, the stub is all-None → useless
         return len(unknown) >= len(sig.required_params)
 

@@ -149,7 +149,7 @@ class Quell:
         )
         from quell.synthesis.rule_engine import RuleEngine
 
-        engine = RuleEngine()
+        engine = RuleEngine(project_root=self.root)
         verifier = Verifier(self.config, project_root=self.root)
         writer = Writer(self.config)
 

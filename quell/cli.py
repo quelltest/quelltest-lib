@@ -309,7 +309,7 @@ def _run_find_impl(
 
     reader = CodeGuardReader()
     checker = CoverageChecker(project_root)
-    rule_engine = RuleEngine()
+    rule_engine = RuleEngine(project_root=project_root)
 
     all_requirements = []
     for f in files:
@@ -894,7 +894,7 @@ def cmd_score(
         )
         reader = CodeGuardReader()
         checker = CoverageChecker(project_root)
-        engine = RuleEngine()
+        engine = RuleEngine(project_root=project_root)
         all_reqs = []
         for f in files:
             all_reqs.extend(reader.read(f))
