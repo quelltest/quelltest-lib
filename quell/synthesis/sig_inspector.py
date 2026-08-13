@@ -192,6 +192,7 @@ def find_project_root(source_file: Path) -> Path:
 def stub_for_call(
     sig: FuncSignature,
     project_fixtures: dict[str, object] | None = None,
+    project_constructions: dict[str, object] | None = None,
 ) -> tuple[str, list[str], list[str]]:
     """Build call argument string for required parameters.
 
@@ -201,6 +202,10 @@ def stub_for_call(
             When a parameter matches one, the test requests that fixture instead
             of a literal stub — the project's real object beats our guess every
             time (spec10 §4.4 rung 1, issue #143).
+        project_constructions: {type_name: Construction} from
+            usage_miner.find_constructions. Used when no fixture matches, so a
+            parameter typed `Team` is built the way the project builds it
+            rather than passed as None (spec10 §4.4 rung 2, issue #144).
 
     Returns:
         args_str      -- e.g. 'file_path=tmp_path / "x.py", count=1'
@@ -212,11 +217,20 @@ def stub_for_call(
     unknown: list[str] = []
 
     for p in sig.required_params:
+        # Rung 1 — the project's own conftest fixture (#143).
         resolved = _resolve_fixture(p, project_fixtures)
         if resolved is not None:
             # Pass the fixture straight through as the argument value.
             args.append(f"{p.name}={resolved}")
             fixtures.append(resolved)
+            continue
+
+        # Rung 2 — a construction site the project already uses (#144).
+        # Tried before literal stubs because a real constructor knows the
+        # type's required arguments and invariants; a stub of None does not.
+        built = _resolve_construction(p, project_constructions)
+        if built is not None:
+            args.append(f"{p.name}={built}")
             continue
 
         stub, fix, unk = _stub_param(p)
@@ -225,6 +239,21 @@ def stub_for_call(
         unknown.extend(unk)
 
     return ", ".join(args), list(dict.fromkeys(fixtures)), unknown
+
+
+def _resolve_construction(
+    p: ParamInfo,
+    project_constructions: dict[str, object] | None,
+) -> str | None:
+    """Return an expression constructing this parameter's type, or None."""
+    if not project_constructions:
+        return None
+    try:
+        from quell.synthesis import usage_miner
+
+        return usage_miner.resolve(p.annotation, project_constructions)  # type: ignore[arg-type]
+    except Exception:  # noqa: BLE001 — invariant #6
+        return None
 
 
 def _resolve_fixture(
