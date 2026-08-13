@@ -45,7 +45,38 @@ app.add_typer(auth_app, name="auth")
 app.add_typer(graph_app, name="graph")
 app.add_typer(sync_app, name="sync")
 
-console = Console()
+def _make_console() -> Console:
+    """Build the console, ensuring stdout can encode what we print.
+
+    Windows consoles default to cp1252. Quell's output uses 13 characters that
+    cp1252 cannot encode — arrows, box-drawing, tier circles, the ✓/⚠/🚩 bucket
+    glyphs — and Rich raises UnicodeEncodeError mid-render. `quell find`, the
+    primary command, therefore died with a traceback instead of printing its
+    results: the tool looked broken on every default Windows terminal even when
+    the run had succeeded.
+
+    Guarding glyphs individually was tried and does not hold; a per-glyph fix
+    shipped for `quell score` and the same crash reappeared in `find` from a
+    different module. Reconfiguring the stream once fixes every call site,
+    including ones added later.
+
+    errors="replace" so a console that genuinely cannot render a character
+    degrades to a placeholder rather than taking the process down.
+    """
+    import sys
+
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue  # not a TextIOWrapper (pytest capture, pipes)
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass  # already detached or unsupported — never fail startup over output
+    return Console()
+
+
+console = _make_console()
 
 
 def _safe_glyph(preferred: str, fallback: str) -> str:
@@ -675,7 +706,12 @@ def _write_scan_report(
     scaffolded_outcomes = {
         "skipped_no_rule", "skipped_local_var", "skipped_async", "skipped_no_gen",
     }
-    written_outcomes = {"verified_and_written", "written"}
+    # "verified" is the outcome the verifier actually records; the other two are
+    # historical spellings. Omitting it sent every successfully verified test
+    # into the FLAGGED bucket, so a run that verified 3 of 4 tests reported
+    # "FLAGGED (4) reason: verified" — self-contradictory, and it made a working
+    # pipeline look broken.
+    written_outcomes = {"verified", "verified_and_written", "written"}
 
     written_items = [it for it in items if it.get("outcome") in written_outcomes]
     scaffolded_items = [it for it in items if it.get("outcome") in scaffolded_outcomes]
@@ -684,16 +720,54 @@ def _write_scan_report(
         if it.get("outcome") not in (written_outcomes | scaffolded_outcomes)
     ]
 
-    total_edge_cases = max(len(gaps) if gaps else len(items), 1)
+    # Delegate to compute_prs rather than recomputing here. This block used to
+    # carry its own copy of the spec7 formula:
+    #
+    #     prs_raw = len(written_items) * 80 / (total_edge_cases * 100) * 100
+    #
+    # whose numerator is quelltest's own output — exactly the construct-validity
+    # defect #156 removed from prs.py, still live on this path and bypassing the
+    # fix entirely. It violated spec10 non-negotiable #1 and reported
+    # "0/100 Edge Cases Uncovered" on a project whose existing tests already
+    # covered part of the surface.
+    from quell.core.confidence.prs import compute_prs
+    from quell.core.models import BucketedResult, OutputBucket
+
+    # Rule-engine tests carry no per-test confidence signal, so they share a
+    # flat nominal value. Used for the WRITTEN bucket display below and as the
+    # confidence input to compute_prs.
     default_rule_confidence = 80
-    prs_raw = int(len(written_items) * default_rule_confidence / (total_edge_cases * 100) * 100)
-    prs_score = max(0, min(100, prs_raw))
-    if prs_score >= 80:
-        prs_tier, prs_label = "green", "Production Ready"
-    elif prs_score >= 60:
-        prs_tier, prs_label = "yellow", "Review Needed"
-    else:
-        prs_tier, prs_label = "red", "Edge Cases Uncovered"
+    covered_count = max(0, len(all_requirements) - len(gaps))
+    # Denominator for the bucket display: how many gaps this run tried to close.
+    total_edge_cases = max(len(gaps) if gaps else len(items), 1)
+    bucketed = (
+        [
+            BucketedResult(
+                requirement_id=str(it.get("requirement_id", "")),
+                bucket=OutputBucket.WRITTEN,
+                gates_passed=5,
+                confidence_score=80,
+            )
+            for it in written_items
+        ]
+        + [
+            BucketedResult(
+                requirement_id=str(it.get("requirement_id", "")),
+                bucket=OutputBucket.SCAFFOLDED,
+                gates_passed=3,
+            )
+            for it in scaffolded_items
+        ]
+        + [
+            BucketedResult(
+                requirement_id=str(it.get("requirement_id", "")),
+                bucket=OutputBucket.FLAGGED,
+            )
+            for it in flagged_items
+        ]
+    )
+    prs = compute_prs(bucketed, covered_count=covered_count)
+    prs_score, prs_tier, prs_label = prs.score, prs.tier, prs.tier_label
 
     from quell.ui.console import render_bucketed_summary
     render_bucketed_summary(
