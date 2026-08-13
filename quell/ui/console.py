@@ -10,6 +10,35 @@ _TIER_COLOR = {"green": "green", "yellow": "yellow", "red": "red"}
 _TIER_EMOJI = {"green": "●", "yellow": "●", "red": "●"}
 
 
+def safe_glyph(preferred: str, fallback: str) -> str:
+    """Return `preferred` only if the active stdout encoding can render it.
+
+    Windows consoles default to cp1252, which cannot encode ✓, ⚠ or 🚩. Rich
+    raises UnicodeEncodeError mid-render, so `quell find` — the primary command
+    — died instead of printing its results, and the whole run looked like a
+    crash rather than a report.
+
+    A guard already existed for the tier glyphs in `quell score`; these were
+    missed because they live in this module rather than in cli.py. That is why
+    the helper now lives here, next to the glyphs it protects.
+    """
+    import sys
+
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        preferred.encode(encoding)
+    except (UnicodeEncodeError, LookupError):
+        return fallback
+    return preferred
+
+
+# Resolved once at import: stdout's encoding does not change mid-run.
+_OK = safe_glyph("✓", "[OK]")
+_WARN = safe_glyph("⚠", "[!]")
+_FLAG = safe_glyph("🚩", "[X]")
+_ARROW = safe_glyph("→", "->")
+
+
 def render_bucketed_summary(
     written: list[dict],  # type: ignore[type-arg]
     scaffolded: list[dict],  # type: ignore[type-arg]
@@ -33,7 +62,7 @@ def render_bucketed_summary(
 
     # ── WRITTEN ───────────────────────────────────────────────────────────────
     console.print(
-        f"[bold green]✓ WRITTEN[/bold green]  ({len(written)})   "
+        f"[bold green]{_OK} WRITTEN[/bold green]  ({len(written)})   "
         "Tests generated, passed 5/5 gates, ready to ship."
     )
     for item in written:
@@ -42,7 +71,7 @@ def render_bucketed_summary(
         tier_tag = f"[bold cyan][{tier}][/bold cyan]" if tier else ""
         file_str = item.get("file") or item.get("requirement_id") or ""
         console.print(
-            f"                 [dim]→[/dim] [blue]{file_str}[/blue]"
+            f"                 [dim]{_ARROW}[/dim] [blue]{file_str}[/blue]"
             f"  confidence: {conf}%  {tier_tag}"
         )
 
@@ -50,18 +79,18 @@ def render_bucketed_summary(
 
     # ── SCAFFOLDED ────────────────────────────────────────────────────────────
     console.print(
-        f"[bold yellow]⚠ SCAFFOLDED[/bold yellow] ({len(scaffolded)}) "
+        f"[bold yellow]{_WARN} SCAFFOLDED[/bold yellow] ({len(scaffolded)}) "
         "Test structure written. You finish the assertion."
     )
     for item in scaffolded:
         sf = item.get("scaffold_file") or item.get("source_file") or ""
-        console.print(f"                 [dim]→[/dim] [yellow]{sf}[/yellow]")
+        console.print(f"                 [dim]{_ARROW}[/dim] [yellow]{sf}[/yellow]")
 
     console.print()
 
     # ── FLAGGED ───────────────────────────────────────────────────────────────
     console.print(
-        f"[bold red]🚩 FLAGGED[/bold red]   ({len(flagged)})  "
+        f"[bold red]{_FLAG} FLAGGED[/bold red]   ({len(flagged)})  "
         "Can't auto-test. Here's why and where to look."
     )
     for item in flagged:
@@ -70,7 +99,7 @@ def render_bucketed_summary(
         loc = f"{src}:{line}" if line else src
         reason = item.get("reason") or "unknown"
         console.print(
-            f"                 [dim]→[/dim] [red]{loc}[/red]"
+            f"                 [dim]{_ARROW}[/dim] [red]{loc}[/red]"
             f"  [dim]reason: {reason}[/dim]"
         )
 
