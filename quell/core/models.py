@@ -182,6 +182,29 @@ class ConfidenceTier(StrEnum):
     LOW    = "LOW"     # <60 — review required; gets # quell: review comment
 
 
+class SkipReason(StrEnum):
+    """Why the rule engine declined to generate a test at all.
+
+    spec10 non-negotiable #6: every skip is typed and reported. A skip is a
+    routing signal, never a terminal state.
+
+    Before this existed the engine had eleven bare `return None` paths. Each
+    one turned a visible failure into a silent one, so local pass-rate rose
+    while the addressable set quietly shrank — which is what "0 of 17 in
+    teams.py" and "0 of 170 cases handled" were actually reporting. Typing
+    them makes the shrinkage measurable, and tells the strategy ladder in
+    §4.4 which rung a case is waiting on.
+    """
+
+    NO_RULE_FOR_KIND     = "no rule implements this constraint kind"
+    ALL_PARAMS_UNKNOWN   = "every required parameter is an unsupported type"
+    OPTIONAL_RETURN      = "return type allows None, so not-None cannot be asserted"
+    SELF_ATTRIBUTE_GUARD = "guard reads self.<attr>; needs class instantiation"
+    LOCAL_VARIABLE_GUARD = "guard reads a local, not a parameter we can inject"
+    UNDETERMINED_PARAM   = "cannot determine which parameter to violate"
+    MODULE_STATE_GUARD   = "guard checks module-level state, not an argument"
+
+
 class FlagReason(StrEnum):
     """Human-readable reason why a test was FLAGGED (not auto-written)."""
     EXTERNAL_API    = "depends on external API"
