@@ -100,6 +100,19 @@ def _find_cached(root_str: str) -> dict[str, Construction]:
     return found
 
 
+def find_class_modules(project_root: Path) -> dict[str, str]:
+    """Return {ClassName: dotted.module} for classes the project defines.
+
+    Exposed so guard_mock can emit `spec=<real class>` rather than an
+    unconstrained MagicMock — a spec'd mock raises AttributeError on a typo'd
+    attribute instead of silently returning another Mock.
+    """
+    try:
+        return _class_modules(project_root.resolve())
+    except Exception:  # noqa: BLE001 — invariant #6
+        return {}
+
+
 def resolve(annotation: str | None, constructions: dict[str, Construction]) -> str | None:
     """Return a construction expression for this annotation, or None."""
     if not annotation or not constructions:
