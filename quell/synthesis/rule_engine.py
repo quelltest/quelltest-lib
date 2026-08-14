@@ -19,7 +19,12 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from quell.core.models import ConstraintKind, GeneratedTest, Requirement
+from quell.core.models import (
+    ConstraintKind,
+    GeneratedTest,
+    Requirement,
+    SkipReason,
+)
 from quell.synthesis import sig_inspector
 
 
@@ -34,6 +39,11 @@ class RuleEngine:
         self._fixtures: dict[str, object] | None = None
         self._constructions: dict[str, object] | None = None
         self._class_modules: dict[str, str] | None = None
+        # Set by _skip() and read by callers after generate() returns None.
+        # An out-of-band field rather than a changed return type: eight
+        # per-kind generators share the `GeneratedTest | None` signature,
+        # and widening all of them would touch far more than this fix needs.
+        self.last_skip: SkipReason | None = None
 
     def _project_fixtures(self, req: Requirement) -> dict[str, object]:
         """Fixtures from the caller-supplied project root, or none.
@@ -82,6 +92,15 @@ class RuleEngine:
             ConstraintKind.CUSTOM,
         }
 
+    def _skip(self, reason: SkipReason) -> None:
+        """Record why generation was declined, then decline.
+
+        Every `return None` in this module goes through here so no skip is
+        ever silent (spec10 non-negotiable #6).
+        """
+        self.last_skip = reason
+        return None
+
     def generate(self, req: Requirement) -> GeneratedTest | None:
         """Generate a test, then adapt it to the project's async test style.
 
@@ -90,9 +109,10 @@ class RuleEngine:
         `asyncio.run(...)` shape, so one post-pass covers every kind and cannot
         drift out of sync with a new one.
         """
+        self.last_skip = None
         test = self._generate_for_kind(req)
         if test is None:
-            return None
+            return None  # _generate_for_kind already recorded last_skip
         return self._apply_async_style(test, req)
 
     def _apply_async_style(self, test: GeneratedTest, req: Requirement) -> GeneratedTest:
@@ -118,7 +138,7 @@ class RuleEngine:
 
     def _generate_for_kind(self, req: Requirement) -> GeneratedTest | None:
         if self._all_required_unknown(req):
-            return None  # all required params are complex objects → no useful stub
+            return self._skip(SkipReason.ALL_PARAMS_UNKNOWN)
         if req.constraint_kind == ConstraintKind.MUST_RAISE:
             return self._must_raise(req)
         if req.constraint_kind == ConstraintKind.BOUNDARY:
@@ -139,7 +159,7 @@ class RuleEngine:
             return self._silent_fail(req)
         if req.constraint_kind == ConstraintKind.CUSTOM:
             return self._custom(req)
-        return None
+        return self._skip(SkipReason.NO_RULE_FOR_KIND)
 
     # ── helpers ──────────────────────────────────────────────────────────────
 
@@ -448,7 +468,7 @@ class RuleEngine:
         # a simple `assert result is not None` will fail on cache-miss / empty
         # inputs — skip and let the report record it as unsupported.
         if sig and _return_is_optional(sig.return_annotation):
-            return None
+            return self._skip(SkipReason.OPTIONAL_RETURN)
 
         call, fixture_str, fixtures, unknown = self._sig_info(req)
         imp = self._import_line(req)
@@ -476,7 +496,7 @@ class RuleEngine:
     def _not_null(self, req: Requirement) -> GeneratedTest | None:
         # Self-attribute checks (if not self.x:) can't be tested by injecting a param
         if "self." in (req.raw_spec_text or ""):
-            return None
+            return self._skip(SkipReason.SELF_ATTRIBUTE_GUARD)
 
         call, fixture_str, fixtures, unknown = self._sig_info(req)
         imp = self._import_line(req)
@@ -495,7 +515,7 @@ class RuleEngine:
         # variable (DB result, computed value, etc.). Use word-boundary check so "user"
         # doesn't false-match inside "user_id=" or "join_team_via_link(...)".
         if null_param and not re.search(rf"\b{re.escape(null_param)}\b\s*=", call):
-            return None
+            return self._skip(SkipReason.LOCAL_VARIABLE_GUARD)
 
         if null_param:
             null_call = re.sub(
@@ -513,7 +533,7 @@ class RuleEngine:
             if null_call == call:
                 null_call = re.sub(r"=\d+", "=None", call, count=1)
             if null_call == call and "=None" not in call:
-                return None  # can't determine which param to nullify — skip
+                return self._skip(SkipReason.UNDETERMINED_PARAM)
 
         wrapped = self._wrap_call(null_call, req)
         code = f"""def {name}{fixture_str}:
@@ -567,7 +587,7 @@ class RuleEngine:
     def _silent_fail(self, req: Requirement) -> GeneratedTest | None:
         # Self-attribute silent fails (if not self.x: return None) need class instantiation
         if "self." in (req.raw_spec_text or ""):
-            return None
+            return self._skip(SkipReason.SELF_ATTRIBUTE_GUARD)
 
         call, fixture_str, fixtures, unknown = self._sig_info(req)
         imp = self._import_line(req)
@@ -597,7 +617,7 @@ class RuleEngine:
                         )
                         break
         if falsy_call == call and "=None" not in call:
-            return None  # can't determine which param to make falsy — skip
+            return self._skip(SkipReason.UNDETERMINED_PARAM)
 
         wrapped = self._wrap_call(falsy_call, req)
         code = f"""def {name}{fixture_str}:
@@ -656,7 +676,7 @@ class RuleEngine:
         the guard can't be triggered — only genuinely provable guards pass through.
         """
         if "self." in (req.raw_spec_text or ""):
-            return None  # attribute guards need class instantiation we can't stub
+            return self._skip(SkipReason.SELF_ATTRIBUTE_GUARD)
 
         raw = req.raw_spec_text or ""
         # Guards that check module-level state (assert ujson is not None,
@@ -670,7 +690,7 @@ class RuleEngine:
             param_names = {p.name for p in sig.callable_params} if sig else set()
             m = re.match(r"assert\s+(\w+)", raw)
             if m and m.group(1) not in param_names:
-                return None  # module-level state check — can't inject via stub
+                return self._skip(SkipReason.MODULE_STATE_GUARD)
 
         call, fixture_str, fixtures, unknown = self._sig_info(req)
         imp = self._import_line(req)
