@@ -33,6 +33,7 @@ class RuleEngine:
         self._project_root = project_root
         self._fixtures: dict[str, object] | None = None
         self._constructions: dict[str, object] | None = None
+        self._class_modules: dict[str, str] | None = None
 
     def _project_fixtures(self, req: Requirement) -> dict[str, object]:
         """Fixtures from the caller-supplied project root, or none.
@@ -229,6 +230,50 @@ class RuleEngine:
         )
         # If every required param is unknown, the stub is all-None → useless
         return len(unknown) >= len(sig.required_params)
+
+    def _class_module_map(self) -> dict[str, str]:
+        if self._project_root is None:
+            return {}
+        if self._class_modules is None:
+            from quell.synthesis import usage_miner
+
+            self._class_modules = usage_miner.find_class_modules(self._project_root)
+        return self._class_modules
+
+    def _apply_guard_mock(self, call: str, req: Requirement, sig: object) -> str:
+        """Rung 3 (#145): replace a None stub with a guard-aware mock.
+
+        Only fires for a parameter still stubbed as None — i.e. one that no
+        fixture (#143) and no mined construction (#144) could supply. A real
+        object always outranks a mock.
+
+        The mock sets the exact attribute the guard reads to a violating value.
+        A plain MagicMock would be truthy and make the guard stop firing; see
+        guard_mock's module docstring.
+        """
+        from quell.synthesis import guard_mock
+
+        guard = guard_mock.parse_guard(req.raw_spec_text)
+        if guard is None:
+            return call
+        # Only substitute a parameter we actually gave up on.
+        if not re.search(rf"{re.escape(guard.obj)}\s*=\s*None", call):
+            return call
+
+        type_name = None
+        params = getattr(sig, "required_params", []) or []
+        for p in params:
+            if p.name == guard.obj and p.annotation:
+                type_name = p.annotation.split("[")[0].split("|")[0].strip().split(".")[-1]
+                break
+
+        module = self._class_module_map().get(type_name or "")
+        expr = guard_mock.build(type_name, module, guard)
+        if expr is None:
+            return call
+        return re.sub(
+            rf"{re.escape(guard.obj)}\s*=\s*None", f"{guard.obj}={expr}", call, count=1
+        )
 
     def _wrap_call(self, call: str, req: Requirement) -> str:
         """Wrap a call expression with asyncio.run(...) if the target is async.
