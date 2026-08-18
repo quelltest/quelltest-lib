@@ -31,11 +31,24 @@ from quell.synthesis import sig_inspector
 class RuleEngine:
     """Deterministic rule-based test generator. No LLM required."""
 
-    def __init__(self, project_root: Path | None = None):
+    #: Rungs of the §4.4 strategy ladder that can be independently disabled.
+    #: Exists so benchmarks/ can ablate one rung at a time and measure what
+    #: each actually contributes (#153). Default is everything on; nothing
+    #: in normal operation passes this.
+    ALL_STRATEGIES = frozenset({"fixtures", "constructions", "guard_mocks"})
+
+    def __init__(
+        self,
+        project_root: Path | None = None,
+        strategies: frozenset[str] | set[str] | None = None,
+    ):
         # The project's own conftest fixtures. Reusing a real `db_session` beats
         # any literal we could invent for an AsyncSession (spec10 §4.4, #143).
         # Discovered once per engine; find_fixtures is itself cached.
         self._project_root = project_root
+        self._strategies = frozenset(
+            self.ALL_STRATEGIES if strategies is None else strategies
+        )
         self._fixtures: dict[str, object] | None = None
         self._constructions: dict[str, object] | None = None
         self._class_modules: dict[str, str] | None = None
@@ -46,6 +59,8 @@ class RuleEngine:
         self.last_skip: SkipReason | None = None
 
     def _project_fixtures(self, req: Requirement) -> dict[str, object]:
+        if "fixtures" not in self._strategies:
+            return {}
         """Fixtures from the caller-supplied project root, or none.
 
         Deliberately NOT inferred from req.target_file. Inferring walks up
@@ -69,7 +84,7 @@ class RuleEngine:
         Same explicit-root rule as fixtures: no root means literal stubs, so
         behaviour is unchanged for callers that do not supply one.
         """
-        if self._project_root is None:
+        if self._project_root is None or "constructions" not in self._strategies:
             return {}
         if self._constructions is None:
             from quell.synthesis import usage_miner
@@ -271,6 +286,9 @@ class RuleEngine:
         A plain MagicMock would be truthy and make the guard stop firing; see
         guard_mock's module docstring.
         """
+        if "guard_mocks" not in self._strategies:
+            return call
+
         from quell.synthesis import guard_mock
 
         guard = guard_mock.parse_guard(req.raw_spec_text)
