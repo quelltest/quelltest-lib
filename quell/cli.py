@@ -253,6 +253,15 @@ def cmd_find(
     auto: bool = typer.Option(False, "--auto", help="Skip confirmation prompts (for CI)"),
     use_llm: bool = typer.Option(False, "--use-llm", help="Enable LLM fallback (requires quell auth)"),
     sync: bool = typer.Option(False, "--sync", help="Push report to cloud after scan (Pro/Team only)"),
+    show_all: bool = typer.Option(
+        False, "--all",
+        help="Show every gap, including ones an existing test already covers",
+    ),
+    measure: bool = typer.Option(
+        False, "--measure",
+        help="Run your test suite once to measure which guards are really executed "
+             "(slower, but replaces inference with ground truth)",
+    ),
     project_root: Path = typer.Option(Path("."), "--root"),
     fmt: str = typer.Option("console", "--format", "-f", help="Output format: console or github"),
 ) -> None:
@@ -280,6 +289,8 @@ def cmd_find(
         no_llm=False,
         project_root=project_root,
         fmt=fmt,
+        show_all=show_all,
+        measure=measure,
     )
 
     if sync:
@@ -296,6 +307,8 @@ def _run_find_impl(
     no_llm: bool = False,
     project_root: Path = Path("."),
     fmt: str = "console",
+    show_all: bool = False,
+    measure: bool = False,
 ) -> None:
     """Shared implementation called by `quell find`."""
     # Fully synchronous — no asyncio.run() at the top level.
@@ -357,8 +370,40 @@ def _run_find_impl(
             )
         return
 
+    if measure:
+        # Ground truth beats inference (spec10 §4.3). This runs the project's
+        # suite once, so it is opt-in: slow, and it executes user code.
+        from quell.coverage import runtime as _runtime
+
+        _cov = _runtime.measure(project_root)
+        checker.use_runtime_coverage(_cov)
+        if fmt != "github":
+            if _cov is None:
+                console.print(
+                    "[dim]Could not measure coverage — falling back to static "
+                    "inference. Reported as inferred, not measured.[/dim]"
+                )
+            else:
+                console.print(
+                    f"[dim]Measured coverage across {_cov.measured_files} file(s).[/dim]"
+                )
+
     all_requirements = checker.check(all_requirements)
     gaps = [r for r in all_requirements if not r.is_covered]
+
+    # Rank and suppress before display (spec10 §4.2). The engine finds; it
+    # should not make the reader do the ranking. 170 flagged / 3 genuine was
+    # the measured state before this.
+    #
+    # `suppressed` is display-only: every finding still reaches the report
+    # below, and --all restores the full console list. Truncate the display,
+    # never the analysis.
+    from quell.coverage import ranker as _ranker
+
+    _ranked = _ranker.rank(gaps, public_names=_ranker.public_names_for(project_root))
+    _suppressed = [g for g in _ranked if not g.is_actionable]
+    if not show_all and _suppressed:
+        gaps = [g.requirement for g in _ranked if g.is_actionable]
 
     if fmt == "github":
         # Emit GitHub Actions workflow commands for inline PR annotations
@@ -371,9 +416,13 @@ def _run_find_impl(
         if not gaps:
             print(f"::notice::Quell: All {len(all_requirements)} guard clauses are tested.")
     else:
-        table = Table(
-            title=f"Logic Gaps Found ({len(gaps)} untested / {len(all_requirements)} total)"
-        )
+        _hidden = len(_suppressed) if not show_all else 0
+        _title = f"Logic Gaps Found ({len(gaps)} untested / {len(all_requirements)} total)"
+        if _hidden:
+            # Say what was hidden and how to see it. Silently shortening the
+            # list would trade one kind of dishonesty for another.
+            _title += f" — {_hidden} already covered, hidden (--all to show)"
+        table = Table(title=_title)
         table.add_column("File", style="blue")
         table.add_column("Function", style="cyan")
         table.add_column("Guard Clause", style="white")
