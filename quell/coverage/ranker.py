@@ -28,6 +28,7 @@ reviewer would have picked out anyway.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -35,12 +36,29 @@ from typing import Any
 
 DEFAULT_DISPLAY_LIMIT = 10
 
+# Exceptions that end the process rather than signal a contract violation.
+# `except Exception: raise typer.Exit(1)` is a CLI printing an error and
+# exiting -- real code, but "does the command exit non-zero when the network
+# fails" is not a test worth generating, and on a CLI codebase these dominate
+# the findings list. Measured on quelltest itself, they were the single largest
+# remaining noise source after coverage-based suppression
+# (benchmarks/G3_MEASUREMENT.md).
+_CONTROL_FLOW_EXCEPTIONS = frozenset({
+    "typer.Exit", "Exit",
+    "click.Abort", "Abort",
+    "click.exceptions.Exit",
+    "SystemExit", "KeyboardInterrupt", "GeneratorExit",
+})
+
+_RAISES_RE = re.compile(r"^raises\s+(?P<exc>[\w.]+)")
+
 
 class Suppression(StrEnum):
     """Why a real finding is not worth showing by default."""
 
     ALREADY_EXERCISED = "an existing test already executes this line"
     PRIVATE_UNCALLED = "private function with no callers in this project"
+    CONTROL_FLOW_EXIT = "raises a process-control exception, not an error contract"
 
 
 @dataclass
@@ -134,6 +152,14 @@ def _score_one(
         gap.reasons.append(Suppression.PRIVATE_UNCALLED.value)
         return gap
 
+    # 3. A guard whose "contract" is to exit the process is control flow, not
+    #    behaviour a test should pin. Checked after the two stronger signals so
+    #    an exercised or unreachable guard keeps its more specific reason.
+    if _raises_control_flow(req):
+        gap.suppressed_by = Suppression.CONTROL_FLOW_EXIT
+        gap.reasons.append(Suppression.CONTROL_FLOW_EXIT.value)
+        return gap
+
     # ── blast radius ────────────────────────────────────────────────────────
     if func in public_names:
         gap.score += 3.0
@@ -154,6 +180,18 @@ def _score_one(
         gap.reasons.append(f"input-validation guard ({kind})")
 
     return gap
+
+
+def _raises_control_flow(req: Any) -> bool:
+    """True when the requirement's raised exception only ends the process."""
+    desc = getattr(req, "description", "") or ""
+    m = _RAISES_RE.match(desc.strip())
+    if m is None:
+        return False
+    exc = m.group("exc")
+    return exc in _CONTROL_FLOW_EXCEPTIONS or exc.rsplit(".", 1)[-1] in {
+        "Exit", "Abort", "SystemExit", "KeyboardInterrupt", "GeneratorExit",
+    }
 
 
 def public_names_for(project_root: Path) -> set[str]:
