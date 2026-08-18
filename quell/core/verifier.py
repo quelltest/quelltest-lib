@@ -507,3 +507,53 @@ def _violate_silent_fail(src: str, func_name: str) -> str:
         'raise ValueError("quell_violation")',
         count=1,
     )
+
+
+def verify_with_repair(
+    verifier: Verifier,
+    req: Requirement,
+    test: GeneratedTest,
+    max_attempts: int = 2,
+) -> VerificationResult:
+    """Verify, and on a Gate 4 failure retry once with the error fed back.
+
+    The loop half of spec10 §4.4 (issue #147). Previously a rejected test was
+    discarded and the stack trace naming exactly what was wrong went with it.
+
+    Only FAILS_ON_CORRECT is retried. A Gate 5 failure means the test ran but
+    did not catch the injected violation -- that is a weak assertion, not a
+    fixable call, and retrying it would only produce the same verdict.
+
+    max_attempts is small on purpose: each attempt costs two pytest subprocess
+    runs, and the diagnoses that are automatable are precise enough that a
+    repair either works immediately or not at all.
+    """
+    from quell.core import repair as _repair
+
+    result = verifier.verify(req, test)
+    attempts = 1
+
+    while (
+        attempts < max_attempts
+        and result.status == VerificationStatus.FAILS_ON_CORRECT
+    ):
+        diagnosis = _repair.diagnose(result.error_message)
+        if not diagnosis.is_repairable:
+            break
+        repaired_code = _repair.attempt_repair(
+            test.test_code, diagnosis, guard_text=req.raw_spec_text
+        )
+        if repaired_code is None or repaired_code == test.test_code:
+            break
+
+        test = test.model_copy(update={"test_code": repaired_code})
+        result = verifier.verify(req, test)
+        attempts += 1
+
+    # Record what happened so the report can say "repaired" rather than just
+    # "verified", and so a failed repair names the cause it could not fix.
+    try:
+        result.repair_attempts = attempts - 1  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 — model may not carry the field
+        pass
+    return result

@@ -579,7 +579,11 @@ def _run_find_impl(
         item["generated_test"] = candidate.test_code
 
         with console.status("Verifying test fails on current code (proving gap)..."):
-            result = verifier.verify(req, candidate)
+            # Feed Gate 4 failures back and retry once (spec10 §4.4, #147)
+            # instead of discarding the trace that names the cause.
+            from quell.core.verifier import verify_with_repair
+
+            result = verify_with_repair(verifier, req, candidate)
 
         if result.status == VerificationStatus.VERIFIED:
             item["outcome"] = "verified"
