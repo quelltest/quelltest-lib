@@ -746,11 +746,6 @@ def _write_scan_report(
     report_path = project_root / "quell-report.json"
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
 
-    if fmt == "github":
-        # In GitHub Actions mode, only emit machine-readable output to stdout.
-        # The report path is available via the action's output variable.
-        return
-
     # ── Three-bucket display (spec7 §2.3) ─────────────────────────────────────
     scaffolded_outcomes = {
         "skipped_no_rule", "skipped_local_var", "skipped_async", "skipped_no_gen",
@@ -817,6 +812,17 @@ def _write_scan_report(
     )
     prs = compute_prs(bucketed, covered_count=covered_count)
     prs_score, prs_tier, prs_label = prs.score, prs.tier, prs.tier_label
+
+    # Add prs_score to the summary so the GitHub Action template can read it
+    summary["prs_score"] = prs_score
+    summary["prs_tier"] = prs_tier
+    summary["prs_label"] = prs_label
+
+    # Re-write the report with the prs_score included
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+
+    if fmt == "github":
+        return
 
     from quell.ui.console import render_bucketed_summary
     render_bucketed_summary(
