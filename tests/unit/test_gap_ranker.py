@@ -149,3 +149,59 @@ def test_public_names_skips_private_and_tests(tmp_path: Path):
 def test_public_names_survives_malformed_source(tmp_path: Path):
     (tmp_path / "broken.py").write_text("def (:\n", encoding="utf-8")
     assert public_names_for(tmp_path) == set()  # invariant #6
+
+
+# ── control-flow exits (the noise G3_MEASUREMENT.md identified) ──────────────
+
+
+def _raise_req(desc: str) -> Requirement:
+    return Requirement(
+        id="r-cf",
+        source=SpecSource.CODE_GUARD,
+        description=desc,
+        constraint_kind=ConstraintKind.MUST_RAISE,
+        target_function="cmd_pr",
+        target_file=Path("quell/cli.py"),
+        source_line=10,
+    )
+
+
+@pytest.mark.parametrize(
+    "desc",
+    [
+        "raises typer.Exit when Exception occurs — except Exception as e:",
+        "raises Exit when Exception occurs — except Exception:",
+        "raises SystemExit when OSError occurs — except OSError:",
+        "raises click.Abort when Exception occurs — except Exception:",
+    ],
+)
+def test_process_control_exceptions_are_suppressed(desc: str):
+    """`except Exception: raise typer.Exit(1)` is a CLI exiting, not a contract."""
+    [g] = rank([_raise_req(desc)])
+    assert g.suppressed_by is Suppression.CONTROL_FLOW_EXIT
+
+
+@pytest.mark.parametrize(
+    "desc",
+    [
+        "raises ValueError when KeyError occurs — except KeyError:",
+        "raises QuellAuthError when HTTPError occurs — except HTTPError:",
+        "raises PermissionError when OSError occurs — except OSError:",
+    ],
+)
+def test_real_error_contracts_are_not_suppressed(desc: str):
+    """Exception translation IS a contract worth testing — must survive."""
+    [g] = rank([_raise_req(desc)])
+    assert g.is_actionable is True
+
+
+def test_non_raise_descriptions_are_unaffected():
+    [g] = rank([_req("charge")])
+    assert g.suppressed_by is not Suppression.CONTROL_FLOW_EXIT
+
+
+def test_exercised_line_keeps_its_more_specific_reason():
+    """Stronger signals win — a covered guard reports coverage, not exit."""
+    cmap = CoverageMap(lines={Path("quell/cli.py").resolve(): {10: {"t"}}})
+    [g] = rank([_raise_req("raises typer.Exit when Exception occurs")], coverage_map=cmap)
+    assert g.suppressed_by is Suppression.ALREADY_EXERCISED

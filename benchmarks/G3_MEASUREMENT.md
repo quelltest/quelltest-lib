@@ -28,13 +28,13 @@ quell find quell/                # inferred
 quell find quell/ --measure      # executed-line ground truth
 ```
 
-| | inferred | measured |
-|---|---|---|
-| guards scanned | 80 | 80 |
-| covered upstream by the checker | 20 | **38** |
-| suppressed by the ranker | 35 | 20 |
-| **surfaced to the reader** | **25** | **22** |
-| surfaced as % of scanned | 31% | **27.5%** |
+| | inferred | measured | measured + control-flow suppressor |
+|---|---|---|---|
+| guards scanned | 80 | 80 | 80 |
+| covered upstream by the checker | 20 | **38** | 38 |
+| suppressed by the ranker | 35 | 20 | **27** |
+| **surfaced to the reader** | **25** | **22** | **15** |
+| surfaced as % of scanned | 31% | 27.5% | **18.75%** |
 
 Measured coverage nearly doubles what the checker can attribute (20 → 38
 guards), because executed-line data sees tests that reach a guard through
@@ -42,19 +42,34 @@ fixtures and indirection that static matching cannot follow.
 
 ## What survives, and is it genuine?
 
-The 22 surfaced findings, by inspection:
+The first measured run surfaced 22, of which roughly half were a cluster of
+`except Exception: raise typer.Exit(1)` handlers in CLI command bodies
+(`cmd_pr`, `auth_login`, `auth_set`, `sync_unlink`). Those are real code, but
+"does the command exit non-zero when the network fails" is not a test worth
+generating. They were the single largest noise source.
 
-- **Genuinely worth testing** — `oauth.login` error/state guards,
-  `oauth.verify_token`, `sync_unlink` `if not token:`, `pr_runner.post_comment`
-  auth check, `app_locator.find_app` silent-fail paths. These are auth, token
-  and silent-failure guards on public entry points.
-- **Weaker** — a cluster of bare `except` clauses inside CLI command bodies
-  (`cmd_pr`, `auth_login`, `auth_set`). Real guards, but error-handling paths
-  in a CLI shell where a test has limited value.
+Adding the `CONTROL_FLOW_EXIT` suppressor removed exactly that cluster:
+**22 → 15**. What remains:
 
-Roughly half the surfaced list is clearly actionable, which puts precision
-around 40–50%, comfortably above the 20% target and an order of magnitude
-above the 1.8% baseline.
+```
+cli.py          sync_unlink       if not token:      not_null
+auth.py         generate_app_jwt  except             must_raise
+cli.py          cmd_ci            if result.score    custom
+cli.py          cmd_init          if not             custom
+oauth.py        login             if error:          custom
+oauth.py        login             if not             custom
+oauth.py        login             if                 auth_check
+oauth.py        verify_token      if                 custom
+tracker.py      get_score_delta   if not history:    silent_fail
+app_locator.py  find_app          if not             silent_fail
+app_locator.py  find_app          if not             silent_fail
+pr_runner.py    post_comment      if not             auth_check
+```
+
+Auth checks, token validation, silent-failure paths — on inspection nearly all
+of these look worth a test. The one arguable entry is
+`generate_app_jwt`'s `except`, which translates a real JWT error rather than
+exiting.
 
 ## Caveats — read before quoting these numbers
 
@@ -64,15 +79,16 @@ above the 1.8% baseline.
 2. **Different codebase.** quelltest is not the backend that produced the 1.8%
    figure. A CLI/library has a different guard profile from an async web
    service — notably far more `except` clauses.
-3. **The strongest remaining noise source is identified**: `except` guards in
-   CLI command bodies. Suppressing guards that are unreachable from any public
-   entry point (spec10 §4.2, third bullet — not yet implemented) would target
-   exactly these.
+3. **The `except`/`typer.Exit` noise source has been fixed** by the
+   `CONTROL_FLOW_EXIT` suppressor. The remaining §4.2 bullet not yet
+   implemented is "guard duplicates validation already enforced upstream"
+   (e.g. a Pydantic model validating before the handler runs).
 
 ## Verdict
 
-The mechanism works and the direction is unambiguous: 72.5% of findings are
-now suppressed with a stated reason, against 0% at baseline. But G3 is stated
+The mechanism works and the direction is unambiguous: **81% of findings are
+now suppressed with a stated reason**, against 0% at baseline, and the
+surfaced list has gone from 25 to 15 while getting visibly more relevant. But G3 is stated
 as a precision figure, and precision needs labelled data.
 
 **Recommended: mark G3 met only after one hand-labelled pass** on a repo of
