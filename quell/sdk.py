@@ -177,7 +177,9 @@ class Quell:
                 skipped += 1
                 continue
 
-            result = verifier.verify(req, test)
+            from quell.core.verifier import verify_with_repair
+
+            result = verify_with_repair(verifier, req, test)
 
             outcomes.append(outcome_from_verification(
                 constraint_kind=req.constraint_kind.value,
