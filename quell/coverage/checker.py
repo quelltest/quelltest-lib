@@ -55,6 +55,9 @@ class CoverageChecker:
     def __init__(self, project_root: Path = Path(".")):
         self.project_root = project_root
         self._index: list[_TestFn] | None = None
+        # Measured per-line coverage (quell.coverage.runtime.CoverageMap), or
+        # None to use static inference. See use_runtime_coverage().
+        self._runtime: object | None = None
 
     # ── public API ───────────────────────────────────────────────────────────
 
@@ -67,14 +70,52 @@ class CoverageChecker:
         """
         return bool(self._build_index())
 
+    @property
+    def mode(self) -> str:
+        """Which evidence produced the last check: "measured" or "inferred".
+
+        spec10 §4.3 requires this be reported alongside any number. Inferred
+        coverage is a static guess; measured coverage is a runtime fact. They
+        must never be presented as the same thing.
+        """
+        return "measured" if self._runtime is not None else "inferred"
+
+    def use_runtime_coverage(self, coverage_map: object | None) -> None:
+        """Supply measured per-line coverage from quell.coverage.runtime.
+
+        Passing None keeps static inference, so callers that cannot or should
+        not run the suite are unaffected.
+        """
+        self._runtime = coverage_map
+
     def check(self, requirements: list[Requirement]) -> list[Requirement]:
         """Mark each Requirement is_covered=True/False. Returns same list."""
         tests = self._build_index()
         for req in requirements:
-            covering = self._find_covering(req, tests)
+            covering = self._covering_by_execution(req)
+            if covering is None:
+                covering = self._find_covering(req, tests)
             req.is_covered = len(covering) > 0
             req.covering_tests = covering
         return requirements
+
+    def _covering_by_execution(self, req: Requirement) -> list[str] | None:
+        """Tests that actually executed this requirement's line, or None.
+
+        None means "no measurement for this line", which is different from an
+        empty list ("measured, nothing ran it"). Only the former falls back to
+        static inference; the latter is a real, measured gap.
+        """
+        if self._runtime is None or not req.source_line:
+            return None
+        try:
+            covered = self._runtime.is_line_covered(req.target_file, req.source_line)  # type: ignore[attr-defined]
+            if not covered:
+                # Measured and genuinely not executed by any test.
+                return []
+            return self._runtime.tests_for(req.target_file, req.source_line)  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 — invariant #6; fall back to inference
+            return None
 
     # ── discovery ────────────────────────────────────────────────────────────
 
