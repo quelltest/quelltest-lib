@@ -22,6 +22,8 @@ Flags the rest with exactly why and where.
 ```bash
 pip install quelltest
 quell find src/
+
+> **Tip:** Run `quell find src/` without `--fix` first to review the detected edge cases before generating any test files.
 ```
 
 ---
