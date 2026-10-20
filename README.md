@@ -4,7 +4,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/quelltest)](https://pypi.org/project/quelltest/)
 [![Python](https://img.shields.io/pypi/pyversions/quelltest)](https://pypi.org/project/quelltest/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-quelltest.com-blue)](https://quelltest.com/docs)
 [![Version](https://img.shields.io/badge/version-v2.0.0-brightgreen)](https://github.com/quelltest/quelltest-lib/releases/tag/v2.0.0)
 

@@ -109,7 +109,7 @@ Only Gate 4+5 survivors become WRITTEN tests. Earlier failures become SCAFFOLDED
 - Version: 2.0.0
 - GitHub: https://github.com/quelltest/quelltest-lib
 - Website: https://quelltest.com
-- License: MIT
+- License: Apache-2.0
 - Author: Shashank Bindal (Gurugram, Haryana, India)
 - Python: 3.11+
 - Spec sources: Python docstrings, Pydantic v2 Field constraints, PySpark StructType, type annotations
