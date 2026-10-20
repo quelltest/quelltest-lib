@@ -8,7 +8,7 @@ version = "2.0.1"
 description = "Find untested edge cases in Python code. 5-gate verified test generation from docstrings, Pydantic models, and type annotations. Production Readiness Score."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = { text = "Apache-2.0" }
 authors = [{ name = "Shashank Bindal", email = "bindalshashank.89@gmail.com" }]
 keywords = [
     "testing",
@@ -33,7 +33,7 @@ keywords = [
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
