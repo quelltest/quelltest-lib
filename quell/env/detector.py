@@ -75,7 +75,7 @@ ENVIRONMENT_STRATEGY: dict[RuntimeEnvironment, EnvironmentStrategy] = {
         ci_setup_hint=(
             "quelltest cannot start containers from inside a Kubernetes pod.\n"
             "Options:\n"
-            "  1. Run `quell check` locally before pushing\n"
+            "  1. Run `quell find` locally before pushing\n"
             "  2. Add a CI job with Docker access (GitHub Actions, GitLab DinD)\n"
             "  3. Use --with-containers=false to run pure-function tests only"
         ),

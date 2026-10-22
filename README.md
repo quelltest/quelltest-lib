@@ -90,7 +90,7 @@ quell find src/ --fix
 quell find src/ --fix --auto
 
 # Set up GitHub Action (posts PRS badge + comment on every PR)
-quell install --action
+quell install --pr
 ```
 
 ---
@@ -105,7 +105,7 @@ quell install --action
 | `quell ci [PATH]` | CI gate — exits non-zero if PRS below threshold. |
 | `quell auth set` | Store LLM API key securely. |
 | `quell init` | Add `[tool.quell]` to `pyproject.toml`. |
-| `quell install --action` | Write GitHub Actions workflow. |
+| `quell install --pr` | Write GitHub Actions workflow. |
 
 Full CLI reference: [docs/cli.md](docs/cli.md)
 

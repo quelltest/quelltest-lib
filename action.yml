@@ -65,7 +65,7 @@ runs:
       # --format github emits ::warning annotations visible inline in the PR diff.
       # The report JSON is always written to quell-report.json regardless of format.
       run: |
-        quell scan "${{ inputs.target }}" --format github || true
+        quell find "${{ inputs.target }}" --format github || true
 
     - name: Parse report
       id: parse-report
@@ -132,7 +132,7 @@ runs:
                 body += `\n_...and ${gapItems.length - 15} more._\n`;
               }
             }
-            body += `\n**Fix locally:** \`quell scan . --fix\`\n`;
+            body += `\n**Fix locally:** \`quell find . --fix\`\n`;
           }
 
           body += `\n---\n`;
@@ -168,6 +168,6 @@ runs:
       run: |
         GAPS="${{ steps.parse-report.outputs.gaps_found }}"
         if [ "${GAPS:-0}" -gt "0" ]; then
-          echo "::error::Quell found ${GAPS} untested guard clause(s). Run 'quell scan . --fix' locally to generate tests."
+          echo "::error::Quell found ${GAPS} untested guard clause(s). Run 'quell find . --fix' locally to generate tests."
           exit 1
         fi

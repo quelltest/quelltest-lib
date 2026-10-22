@@ -26,6 +26,9 @@ Changes on `master` since 2.0.0 that are not on PyPI yet (`pyproject.toml` alrea
 - The verifier runs candidate tests inside the project's test tree (#160).
 - Boundary injection no longer corrupts mined constructions (#173); synthesis rung 3 is now actually called and composed with rung 2 (#174).
 - Six defects found by adversarial review (#176); CI: the fake self-check is fixed, lint is wider, the synthesis ladder is gated and the CLI contract is pinned (#175); a mis-attributed benchmark claim for rung 1 is retracted and marginal contribution is measured instead (#177).
+- `quell find`, the PR comments, the GitHub Action and the environment hints no longer tell you to run the removed `quell scan` / `quell check`; they point to `quell find ... --fix`. The composite `action.yml` was running `quell scan ... || true`, so it silently scanned nothing (#180).
+- The docs no longer document a non-existent `quell install --action` flag (the flag is `--pr`) and describe what `quell install` really writes (#181).
+
 ## 2.0.0 - 2026-05-16
 
 Three-bucket output, a 5-gate verification pipeline and the Production Readiness Score.
