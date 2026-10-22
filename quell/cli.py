@@ -96,7 +96,7 @@ def _safe_glyph(preferred: str, fallback: str) -> str:
     return preferred
 
 
-# GitHub Actions workflow template — written by `quell install --action`
+# GitHub Actions workflow template — written by `quell install --pr`
 GITHUB_ACTION_YAML = """\
 name: Quell — Edge Case Scanner
 
@@ -450,7 +450,7 @@ def _run_find_impl(
     if not fix:
         if fmt != "github":
             console.print(
-                f"\n[yellow]Run [bold]quell scan {target} --fix[/bold] "
+                f"\n[yellow]Run [bold]quell find {target} --fix[/bold] "
                 "to generate failing tests.[/yellow]"
             )
         # Still write detection-only report
@@ -1258,7 +1258,7 @@ def cmd_pr(
             table.add_row(g["file"], g["function"], g["description"], g["kind"])
 
         console.print(table)
-        console.print("\n[yellow]Fix locally:[/yellow] quell check src/ --fix")
+        console.print("\n[yellow]Fix locally:[/yellow] quell find src/ --fix")
 
     if comment:
         with console.status("Posting comment to PR..."):

@@ -161,7 +161,7 @@ def _format_app_comment(report: dict) -> str:
         if len(gaps) > 15:
             lines.append(f"| _...and {len(gaps) - 15} more_ | | | |")
         lines.append("")
-        lines.append("**Fix locally:** `quell scan src/ --fix`")
+        lines.append("**Fix locally:** `quell find src/ --fix`")
 
     lines.append("")
     lines.append("---")

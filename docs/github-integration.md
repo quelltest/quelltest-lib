@@ -149,7 +149,7 @@ re-posted):
 | sessions.py:18 | create_session   | if not user:             | not_null |
 | auth.py:44     | require_auth     | if not is_authenticated: | auth     |
 
-Fix locally: quell scan . --fix
+Fix locally: quell find . --fix
 ```
 
 **No code is sent anywhere.** The scanner runs on the GitHub Actions runner

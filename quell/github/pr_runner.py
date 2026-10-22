@@ -250,7 +250,7 @@ class GitHubPRRunner:
                 )
             if len(gaps) > 10:
                 lines.append(f"\n_...and {len(gaps) - 10} more._")
-            lines.append("\n**Fix locally:** `quell check src/ --fix`")
+            lines.append("\n**Fix locally:** `quell find src/ --fix`")
 
         from quell import __version__
         lines.append(
