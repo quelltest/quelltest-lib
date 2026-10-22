@@ -60,10 +60,10 @@ quell find src/ --fix --auto
 Install the GitHub Action:
 
 ```bash
-quell install --action
+quell install --pr
 ```
 
-This writes `.github/workflows/quelltest.yml`. On every PR it runs `quell find --format github`, posts inline annotations on untested lines, and comments a PRS summary.
+This writes `.github/workflows/quell.yml`. On every PR it runs `quell find --format github`, posts inline annotations on untested lines, and comments a PRS summary.
 
 Or add the action directly to your workflow:
 

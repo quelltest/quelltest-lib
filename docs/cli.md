@@ -152,27 +152,28 @@ Creates the block with all default values. Safe to run on an existing project â€
 
 ## `quell install`
 
-Install integrations.
+Install integrations. With no flags, installs both.
 
 ```bash
-quell install --action    # write .github/workflows/quelltest.yml
-quell install --hook      # write .git/hooks/pre-commit
+quell install --pr      # write .github/workflows/quell.yml
+quell install --hook    # add Quell to .pre-commit-config.yaml
+quell install           # both
 ```
 
 **Options**
 
 | Flag | Description |
 |------|-------------|
-| `--action` | Write GitHub Actions workflow that runs `quell find --format github` and posts PRS comment |
-| `--hook` | Write git pre-commit hook |
+| `--pr` | Write a GitHub Actions workflow that runs `quell find --format github` and posts a PRS comment |
+| `--hook` | Add a pre-commit hook entry to `.pre-commit-config.yaml` |
 
 ---
 
-## Deprecated Commands
+## Removed Commands
 
-The following commands still work but are deprecated in v2.0.0:
+The following commands were removed in v1.2. They now exit with an error telling you to use `quell find`:
 
-| Deprecated | Replacement | Removed in |
-|-----------|-------------|-----------|
-| `quell scan` | `quell find` | v2.2 |
-| `quell check` | `quell find` | v2.2 |
+| Removed | Replacement |
+|---------|-------------|
+| `quell scan` | `quell find` |
+| `quell check` | `quell find` |

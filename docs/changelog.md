@@ -47,7 +47,7 @@ Full release history. All dates UTC. Source on [GitHub](https://github.com/quell
 - `quell auth status --privacy` shows what gets sent per auth mode
 
 **GitHub Action update**
-- `quell install --action` writes updated workflow that posts a PRS comment on every PR
+- `quell install --pr` writes updated workflow that posts a PRS comment on every PR
 - PRS tier emoji (🟢/🟡/🔴) shown inline in the comment
 
 ---
